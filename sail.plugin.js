@@ -3,6 +3,306 @@ function definePlugin(plugin2) {
   return plugin2;
 }
 
+// src/dispatch.ts
+var SAIL_TARGETS = [
+  "soh",
+  "2s2h",
+  "both",
+  "any"
+];
+var GAME_LABEL = {
+  soh: "Ship of Harkinian",
+  "2s2h": "2 Ship 2 Harkinian"
+};
+function intendedGames(target) {
+  if (target === "soh") return [
+    "soh"
+  ];
+  if (target === "2s2h") return [
+    "2s2h"
+  ];
+  return [
+    "soh",
+    "2s2h"
+  ];
+}
+function liveGames(target, isConnected) {
+  const live = intendedGames(target).filter(isConnected);
+  return target === "any" ? live.slice(0, 1) : live;
+}
+function describeOffline(target) {
+  if (target === "both" || target === "any") return "no game is connected";
+  return `${GAME_LABEL[intendedGames(target)[0]]} isn't connected`;
+}
+var ServerDispatch = class {
+  #servers;
+  /** Holds the live map, so restarting the listeners doesn't stale this out. */
+  constructor(servers2) {
+    this.#servers = servers2;
+  }
+  connected(game) {
+    return this.#servers.get(game)?.connected ?? false;
+  }
+  send(game, body) {
+    const client = this.#servers.get(game)?.clients[0];
+    if (!client) return Promise.resolve("failure");
+    return client.send(body);
+  }
+};
+
+// src/functions.ts
+var EFFECT_NAMES = [
+  "SetSceneFlag",
+  "UnsetSceneFlag",
+  "SetFlag",
+  "UnsetFlag",
+  "ModifyHeartContainers",
+  "FillMagic",
+  "EmptyMagic",
+  "ModifyRupees",
+  "NoUI",
+  "ModifyGravity",
+  "ModifyHealth",
+  "SetPlayerHealth",
+  "FreezePlayer",
+  "BurnPlayer",
+  "ElectrocutePlayer",
+  "KnockbackPlayer",
+  "ModifyLinkSize",
+  "InvisibleLink",
+  "PacifistMode",
+  "DisableZTargeting",
+  "WeatherRainstorm",
+  "ReverseControls",
+  "ForceEquipBoots",
+  "ModifyRunSpeedModifier",
+  "OneHitKO",
+  "ModifyDefenseModifier",
+  "GiveOrTakeShield",
+  "TeleportPlayer",
+  "ClearAssignedButtons",
+  "SetTimeOfDay",
+  "SetCollisionViewer",
+  "SetCosmeticsColor",
+  "RandomizeCosmetics",
+  "PressButton",
+  "PressRandomButton",
+  "AddOrTakeAmmo",
+  "RandomBombFuseTimer",
+  "DisableLedgeGrabs",
+  "RandomWind",
+  "RandomBonks",
+  "PlayerInvincibility",
+  "SlipperyFloor"
+];
+function parseParameters(raw) {
+  if (!raw) return [];
+  return raw.split(",").map((part) => part.trim()).filter((part) => part.length > 0).map((part) => {
+    const n = Number(part);
+    return Number.isFinite(n) ? n : part;
+  });
+}
+var ok = (out) => out ? {
+  ok: true,
+  out
+} : {
+  ok: true
+};
+var fail = (error) => ({
+  ok: false,
+  error
+});
+function targetParam() {
+  return {
+    key: "target",
+    label: "Game",
+    type: "select",
+    options: [
+      ...SAIL_TARGETS
+    ],
+    default: "any",
+    required: true
+  };
+}
+function readTarget(raw) {
+  return SAIL_TARGETS.includes(raw ?? "") ? raw : "any";
+}
+function buildSailFunctions(deps) {
+  const { dispatch } = deps;
+  const isConnected = (game) => dispatch.connected(game);
+  return [
+    {
+      id: "command",
+      name: "Run a console command",
+      description: "Send a console command (e.g. `spawn 0x0018`). Works on both games.",
+      requires: {
+        account: "none"
+      },
+      params: [
+        targetParam(),
+        {
+          key: "command",
+          label: "Console command",
+          type: "string",
+          required: true
+        }
+      ],
+      run: async (ctx) => {
+        const command = (ctx.params.command ?? "").trim();
+        if (!command) return fail("no command was given");
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+        const results = await Promise.all(games.map(async (game) => ({
+          game,
+          status: await dispatch.send(game, {
+            type: "command",
+            command
+          })
+        })));
+        return summarize(results);
+      }
+    },
+    {
+      id: "effect",
+      name: "Apply or remove an effect",
+      description: "Fire one of SoH's named effects. 2S2H stubs effects, so set a 2S2H console-command override to cover it in the same step.",
+      requires: {
+        account: "none"
+      },
+      params: [
+        targetParam(),
+        {
+          key: "name",
+          label: "Effect",
+          type: "select",
+          options: [
+            ...EFFECT_NAMES
+          ],
+          required: true
+        },
+        {
+          key: "action",
+          label: "Action",
+          type: "select",
+          options: [
+            "apply",
+            "remove"
+          ],
+          default: "apply",
+          required: true
+        },
+        {
+          key: "parameters",
+          label: "Parameters (comma-separated)",
+          type: "string"
+        },
+        {
+          key: "s2h_command",
+          label: "2S2H console-command override",
+          type: "string",
+          description: "Sent to 2S2H instead of the effect, which 2S2H doesn't implement."
+        }
+      ],
+      run: async (ctx) => {
+        const name = (ctx.params.name ?? "").trim();
+        if (!name) return fail("no effect was given");
+        const action = ctx.params.action === "remove" ? "remove" : "apply";
+        const override = (ctx.params.s2h_command ?? "").trim();
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+        const unsupported = games.filter((g) => g === "2s2h" && !override);
+        const actionable = games.filter((g) => g !== "2s2h" || override);
+        if (actionable.length === 0) {
+          return fail(`effects aren't supported on ${GAME_LABEL["2s2h"]} \u2014 set a 2S2H console-command override`);
+        }
+        const results = await Promise.all(actionable.map(async (game) => {
+          if (game === "2s2h") {
+            return {
+              game,
+              status: await dispatch.send(game, {
+                type: "command",
+                command: override
+              })
+            };
+          }
+          const effect = {
+            type: action,
+            name
+          };
+          if (action === "apply") {
+            const parameters = parseParameters(ctx.params.parameters);
+            if (parameters.length > 0) effect.parameters = parameters;
+          }
+          return {
+            game,
+            status: await dispatch.send(game, {
+              type: "effect",
+              effect
+            })
+          };
+        }));
+        const summary = summarize(results);
+        if (summary.ok && unsupported.length > 0) {
+          return ok({
+            ...summary.out ?? {},
+            unsupported: unsupported.join(",")
+          });
+        }
+        return summary;
+      }
+    },
+    {
+      id: "teleport",
+      name: "Teleport to an entrance",
+      description: "Teleport the player to an entrance id. 2 Ship 2 Harkinian only.",
+      requires: {
+        account: "none"
+      },
+      params: [
+        {
+          key: "entranceId",
+          label: "Entrance id",
+          type: "number",
+          required: true
+        }
+      ],
+      run: async (ctx) => {
+        const entranceId = Number((ctx.params.entranceId ?? "").trim());
+        if (!Number.isInteger(entranceId)) {
+          return fail(`"${ctx.params.entranceId}" is not an entrance id`);
+        }
+        if (!dispatch.connected("2s2h")) {
+          return fail(`${GAME_LABEL["2s2h"]} isn't connected`);
+        }
+        const status = await dispatch.send("2s2h", {
+          type: "effect",
+          effect: {
+            type: "teleport",
+            entranceId
+          }
+        });
+        return status === "success" ? ok({
+          games: "2s2h",
+          entranceId
+        }) : fail(`2S2H reported ${status}`);
+      }
+    }
+  ];
+}
+function summarize(results) {
+  const delivered = results.filter((r) => r.status === "success");
+  if (delivered.length === 0) {
+    const detail = results.map((r) => `${r.game}: ${r.status}`).join(", ");
+    return fail(detail || "nothing was sent");
+  }
+  return ok({
+    games: delivered.map((r) => r.game).join(","),
+    delivered: delivered.length
+  });
+}
+
 // src/protocol.ts
 var TS2H_DEFAULT_HOOKS = [
   "OnSceneInit",
@@ -354,10 +654,10 @@ var SailServer = class {
 // mod.ts
 var DEFAULT_SOH_PORT = 43384;
 var DEFAULT_S2H_PORT = 43385;
-var servers = [];
+var servers = /* @__PURE__ */ new Map();
 function stopAll() {
-  for (const server of servers) server.stop();
-  servers = [];
+  for (const server of servers.values()) server.stop();
+  servers.clear();
 }
 var plugin = definePlugin({
   id: "sail",
@@ -388,13 +688,17 @@ var plugin = definePlugin({
     };
     const startAll = () => {
       stopAll();
-      servers = [
-        makeServer(ctx, "soh", port("soh_port", DEFAULT_SOH_PORT)),
-        makeServer(ctx, "2s2h", port("s2h_port", DEFAULT_S2H_PORT))
-      ];
-      for (const server of servers) server.start();
+      servers.set("soh", makeServer(ctx, "soh", port("soh_port", DEFAULT_SOH_PORT)));
+      servers.set("2s2h", makeServer(ctx, "2s2h", port("s2h_port", DEFAULT_S2H_PORT)));
+      for (const server of servers.values()) server.start();
     };
     startAll();
+    const dispatch = new ServerDispatch(servers);
+    for (const spec of buildSailFunctions({
+      dispatch
+    })) {
+      ctx.functions.register(spec);
+    }
     ctx.settings.onChange((key) => {
       if (key === "soh_port" || key === "s2h_port") {
         ctx.log.info("port changed \u2014 restarting the Sail listeners");
@@ -429,7 +733,9 @@ function reportStatus(ctx, inv) {
     soh: "SoH",
     "2s2h": "2S2H"
   };
-  const parts = servers.map((server) => {
+  const parts = [
+    ...servers.values()
+  ].map((server) => {
     if (server.error) return `${label[server.game]}: port error`;
     if (!server.listening) return `${label[server.game]}: off`;
     return `${label[server.game]}: ${server.connected ? "connected" : `waiting on ${server.port}`}`;

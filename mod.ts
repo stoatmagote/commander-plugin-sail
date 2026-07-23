@@ -21,6 +21,8 @@ import {
   type Invocation,
   type Plugin,
 } from "@twitch-commander/plugin";
+import { ServerDispatch } from "./src/dispatch.ts";
+import { buildSailFunctions } from "./src/functions.ts";
 import type { SailGame, SailHook } from "./src/protocol.ts";
 import { SailServer } from "./src/server.ts";
 
@@ -28,12 +30,14 @@ const DEFAULT_SOH_PORT = 43384;
 const DEFAULT_S2H_PORT = 43385;
 
 // Held across setup/teardown: these own OS ports, which ctx's disposables can't
-// close for us.
-let servers: SailServer[] = [];
+// close for us. The map is mutated in place rather than replaced, so the
+// dispatch handed to the functions keeps seeing the current servers after a
+// port change restarts them.
+const servers = new Map<SailGame, SailServer>();
 
 function stopAll(): void {
-  for (const server of servers) server.stop();
-  servers = [];
+  for (const server of servers.values()) server.stop();
+  servers.clear();
 }
 
 const plugin: Plugin = definePlugin({
@@ -70,13 +74,23 @@ const plugin: Plugin = definePlugin({
 
     const startAll = () => {
       stopAll();
-      servers = [
+      servers.set(
+        "soh",
         makeServer(ctx, "soh", port("soh_port", DEFAULT_SOH_PORT)),
+      );
+      servers.set(
+        "2s2h",
         makeServer(ctx, "2s2h", port("s2h_port", DEFAULT_S2H_PORT)),
-      ];
-      for (const server of servers) server.start();
+      );
+      for (const server of servers.values()) server.start();
     };
     startAll();
+
+    // Game-control functions: the building blocks for chat commands.
+    const dispatch = new ServerDispatch(servers);
+    for (const spec of buildSailFunctions({ dispatch })) {
+      ctx.functions.register(spec);
+    }
 
     // A port change has to rebind, or the games would dial a stale port.
     ctx.settings.onChange((key) => {
@@ -121,7 +135,7 @@ function describeHook(hook: SailHook): string {
 /** `!sail` — report which games are connected. */
 function reportStatus(ctx: Ctx, inv: Invocation): Promise<void> {
   const label: Record<SailGame, string> = { soh: "SoH", "2s2h": "2S2H" };
-  const parts = servers.map((server) => {
+  const parts = [...servers.values()].map((server) => {
     if (server.error) return `${label[server.game]}: port error`;
     if (!server.listening) return `${label[server.game]}: off`;
     return `${label[server.game]}: ${
