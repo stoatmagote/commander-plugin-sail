@@ -89,7 +89,7 @@ const ok = (out?: Record<string, unknown>): FunctionResult =>
 const fail = (error: string): FunctionResult => ({ ok: false, error });
 
 /** The target param, shared by the functions that accept one. */
-function targetParam() {
+export function targetParam() {
   return {
     key: "target",
     label: "Game",
@@ -100,7 +100,7 @@ function targetParam() {
   };
 }
 
-function readTarget(raw: string | undefined): SailTarget {
+export function readTarget(raw: string | undefined): SailTarget {
   return (SAIL_TARGETS as readonly string[]).includes(raw ?? "")
     ? raw as SailTarget
     : "any";

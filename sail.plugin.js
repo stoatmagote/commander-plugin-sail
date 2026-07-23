@@ -651,10 +651,197 @@ var SailServer = class {
   }
 };
 
+// src/spawn.ts
+var SPAWN_VERBS = [
+  "spawn",
+  "safespawn",
+  "spawnfwd"
+];
+function parseActorId(raw) {
+  const s = (raw ?? "").trim();
+  if (!s) return null;
+  const n = /^0x/i.test(s) ? parseInt(s.slice(2), 16) : Number(s);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+function buildSpawnCommand(verb, actorId, params) {
+  const v = SPAWN_VERBS.includes(verb) ? verb : "spawn";
+  const extra = params.trim();
+  return extra ? `${v} ${actorId} ${extra}` : `${v} ${actorId}`;
+}
+var SpawnConfirmer = class {
+  #waiters = [];
+  #setTimer;
+  #clearTimer;
+  constructor(timers) {
+    this.#setTimer = timers?.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.#clearTimer = timers?.clearTimer ?? ((h) => clearTimeout(h));
+  }
+  get pending() {
+    return this.#waiters.length;
+  }
+  /** Wait for an OnActorInit matching (game, actorId) within timeoutMs. */
+  await(game, actorId, timeoutMs) {
+    let done = false;
+    let timer;
+    const waiter = {
+      game,
+      actorId,
+      settle: () => {
+      }
+    };
+    const confirmed = new Promise((resolve) => {
+      waiter.settle = (value) => {
+        if (done) return;
+        done = true;
+        this.#clearTimer(timer);
+        this.#remove(waiter);
+        resolve(value);
+      };
+      timer = this.#setTimer(() => waiter.settle(false), timeoutMs);
+    });
+    this.#waiters.push(waiter);
+    return {
+      confirmed,
+      cancel: () => waiter.settle(false)
+    };
+  }
+  /** Feed a hook; an OnActorInit confirms the oldest matching waiter. */
+  deliver(game, hook) {
+    if (hook.type !== "OnActorInit") return;
+    const actorId = Number(hook.actorId);
+    if (!Number.isInteger(actorId)) return;
+    const waiter = this.#waiters.find((w) => w.game === game && w.actorId === actorId);
+    waiter?.settle(true);
+  }
+  /** Fail every in-flight wait (teardown). */
+  cancelAll() {
+    for (const waiter of [
+      ...this.#waiters
+    ]) waiter.settle(false);
+  }
+  #remove(waiter) {
+    const idx = this.#waiters.indexOf(waiter);
+    if (idx !== -1) this.#waiters.splice(idx, 1);
+  }
+};
+var ok2 = (out) => ({
+  ok: true,
+  out
+});
+var fail2 = (error) => ({
+  ok: false,
+  error
+});
+function buildSpawnFunction(deps) {
+  const { dispatch, confirmer: confirmer2 } = deps;
+  const isConnected = (game) => dispatch.connected(game);
+  const s2hSubs = /* @__PURE__ */ new Map();
+  const acquire2s2h = async (actorId) => {
+    const count = s2hSubs.get(actorId) ?? 0;
+    s2hSubs.set(actorId, count + 1);
+    if (count === 0) {
+      await dispatch.send("2s2h", {
+        type: "subscribe",
+        eventName: "OnActorInit",
+        eventIdFilter: actorId
+      });
+    }
+  };
+  const release2s2h = async (actorId) => {
+    const count = (s2hSubs.get(actorId) ?? 1) - 1;
+    if (count <= 0) {
+      s2hSubs.delete(actorId);
+      await dispatch.send("2s2h", {
+        type: "unsubscribe",
+        eventName: "OnActorInit",
+        eventIdFilter: actorId
+      });
+    } else {
+      s2hSubs.set(actorId, count);
+    }
+  };
+  async function spawnOne(game, actorId, command) {
+    if (!deps.confirmEnabled()) {
+      const status = await dispatch.send(game, {
+        type: "command",
+        command
+      });
+      return status === "success";
+    }
+    if (game === "2s2h") await acquire2s2h(actorId);
+    try {
+      const wait = confirmer2.await(game, actorId, deps.windowMs());
+      const status = await dispatch.send(game, {
+        type: "command",
+        command
+      });
+      if (status !== "success") {
+        wait.cancel();
+        return false;
+      }
+      return await wait.confirmed;
+    } finally {
+      if (game === "2s2h") await release2s2h(actorId);
+    }
+  }
+  return {
+    id: "spawn",
+    name: "Spawn an actor",
+    description: "Spawn an actor by id and confirm it appeared (via OnActorInit) before charging. No confirmation \u2192 the viewer is refunded.",
+    requires: {
+      account: "none"
+    },
+    params: [
+      targetParam(),
+      {
+        key: "actorId",
+        label: "Actor id (decimal or 0x-hex)",
+        type: "string",
+        required: true
+      },
+      {
+        key: "verb",
+        label: "Spawn command",
+        type: "select",
+        options: [
+          ...SPAWN_VERBS
+        ],
+        default: "spawn"
+      },
+      {
+        key: "params",
+        label: "Extra arguments",
+        type: "string"
+      }
+    ],
+    run: async (ctx) => {
+      const actorId = parseActorId(ctx.params.actorId);
+      if (actorId === null) {
+        return fail2(`"${ctx.params.actorId}" is not an actor id`);
+      }
+      const command = buildSpawnCommand(ctx.params.verb ?? "spawn", actorId, ctx.params.params ?? "");
+      const target = readTarget(ctx.params.target);
+      const games = liveGames(target, isConnected);
+      if (games.length === 0) return fail2(describeOffline(target));
+      const results = await Promise.all(games.map((game) => spawnOne(game, actorId, command)));
+      if (!results.every(Boolean)) {
+        return fail2(deps.confirmEnabled() ? `spawn not confirmed within ${deps.windowMs()}ms` : "the spawn wasn't accepted");
+      }
+      return ok2({
+        actorId,
+        games: games.join(","),
+        confirmed: games.length
+      });
+    }
+  };
+}
+
 // mod.ts
 var DEFAULT_SOH_PORT = 43384;
 var DEFAULT_S2H_PORT = 43385;
+var DEFAULT_CONFIRM_WINDOW_MS = 1500;
 var servers = /* @__PURE__ */ new Map();
+var confirmer;
 function stopAll() {
   for (const server of servers.values()) server.stop();
   servers.clear();
@@ -680,6 +867,20 @@ var plugin = definePlugin({
         type: "number",
         default: DEFAULT_S2H_PORT,
         description: "The port 2S2H's Sail connects to. Must match the game's setting."
+      },
+      {
+        key: "spawn_confirm",
+        label: "Confirm spawns",
+        type: "boolean",
+        default: true,
+        description: "Wait for the game to confirm a spawn (OnActorInit) before charging. Off = charge as soon as the command is accepted."
+      },
+      {
+        key: "spawn_confirm_window_ms",
+        label: "Spawn confirm window (ms)",
+        type: "number",
+        default: DEFAULT_CONFIRM_WINDOW_MS,
+        description: "How long to wait for a spawn's OnActorInit before refunding."
       }
     ]);
     const port = (key, fallback) => {
@@ -692,6 +893,7 @@ var plugin = definePlugin({
       servers.set("2s2h", makeServer(ctx, "2s2h", port("s2h_port", DEFAULT_S2H_PORT)));
       for (const server of servers.values()) server.start();
     };
+    confirmer = new SpawnConfirmer();
     startAll();
     const dispatch = new ServerDispatch(servers);
     for (const spec of buildSailFunctions({
@@ -699,6 +901,15 @@ var plugin = definePlugin({
     })) {
       ctx.functions.register(spec);
     }
+    ctx.functions.register(buildSpawnFunction({
+      dispatch,
+      confirmer,
+      confirmEnabled: () => ctx.settings.get("spawn_confirm") === true,
+      windowMs: () => {
+        const raw = Number(ctx.settings.get("spawn_confirm_window_ms"));
+        return raw > 0 ? raw : DEFAULT_CONFIRM_WINDOW_MS;
+      }
+    }));
     ctx.settings.onChange((key) => {
       if (key === "soh_port" || key === "s2h_port") {
         ctx.log.info("port changed \u2014 restarting the Sail listeners");
@@ -713,6 +924,8 @@ var plugin = definePlugin({
   },
   teardown() {
     stopAll();
+    confirmer?.cancelAll();
+    confirmer = void 0;
   }
 });
 var mod_default = plugin;
@@ -721,7 +934,10 @@ function makeServer(ctx, game, port) {
     game,
     port,
     log: ctx.log,
-    onHook: (g, hook) => ctx.log.debug(`[sail:${g}] ${describeHook(hook)}`)
+    onHook: (g, hook) => {
+      confirmer?.deliver(g, hook);
+      ctx.log.debug(`[sail:${g}] ${describeHook(hook)}`);
+    }
   });
 }
 function describeHook(hook) {

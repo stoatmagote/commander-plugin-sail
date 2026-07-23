@@ -25,15 +25,21 @@ import { ServerDispatch } from "./src/dispatch.ts";
 import { buildSailFunctions } from "./src/functions.ts";
 import type { SailGame, SailHook } from "./src/protocol.ts";
 import { SailServer } from "./src/server.ts";
+import { buildSpawnFunction, SpawnConfirmer } from "./src/spawn.ts";
 
 const DEFAULT_SOH_PORT = 43384;
 const DEFAULT_S2H_PORT = 43385;
+const DEFAULT_CONFIRM_WINDOW_MS = 1500;
 
 // Held across setup/teardown: these own OS ports, which ctx's disposables can't
 // close for us. The map is mutated in place rather than replaced, so the
 // dispatch handed to the functions keeps seeing the current servers after a
 // port change restarts them.
 const servers = new Map<SailGame, SailServer>();
+
+// Confirms spawns from OnActorInit hooks. Recreated each setup so a re-enable
+// starts clean; every hook is fed to it.
+let confirmer: SpawnConfirmer | undefined;
 
 function stopAll(): void {
   for (const server of servers.values()) server.stop();
@@ -65,6 +71,22 @@ const plugin: Plugin = definePlugin({
         description:
           "The port 2S2H's Sail connects to. Must match the game's setting.",
       },
+      {
+        key: "spawn_confirm",
+        label: "Confirm spawns",
+        type: "boolean",
+        default: true,
+        description:
+          "Wait for the game to confirm a spawn (OnActorInit) before charging. Off = charge as soon as the command is accepted.",
+      },
+      {
+        key: "spawn_confirm_window_ms",
+        label: "Spawn confirm window (ms)",
+        type: "number",
+        default: DEFAULT_CONFIRM_WINDOW_MS,
+        description:
+          "How long to wait for a spawn's OnActorInit before refunding.",
+      },
     ]);
 
     const port = (key: string, fallback: number) => {
@@ -84,6 +106,7 @@ const plugin: Plugin = definePlugin({
       );
       for (const server of servers.values()) server.start();
     };
+    confirmer = new SpawnConfirmer();
     startAll();
 
     // Game-control functions: the building blocks for chat commands.
@@ -91,6 +114,15 @@ const plugin: Plugin = definePlugin({
     for (const spec of buildSailFunctions({ dispatch })) {
       ctx.functions.register(spec);
     }
+    ctx.functions.register(buildSpawnFunction({
+      dispatch,
+      confirmer,
+      confirmEnabled: () => ctx.settings.get("spawn_confirm") === true,
+      windowMs: () => {
+        const raw = Number(ctx.settings.get("spawn_confirm_window_ms"));
+        return raw > 0 ? raw : DEFAULT_CONFIRM_WINDOW_MS;
+      },
+    }));
 
     // A port change has to rebind, or the games would dial a stale port.
     ctx.settings.onChange((key) => {
@@ -109,6 +141,8 @@ const plugin: Plugin = definePlugin({
 
   teardown() {
     stopAll();
+    confirmer?.cancelAll();
+    confirmer = undefined;
   },
 });
 
@@ -119,7 +153,10 @@ function makeServer(ctx: Ctx, game: SailGame, port: number): SailServer {
     game,
     port,
     log: ctx.log,
-    onHook: (g, hook) => ctx.log.debug(`[sail:${g}] ${describeHook(hook)}`),
+    onHook: (g, hook) => {
+      confirmer?.deliver(g, hook);
+      ctx.log.debug(`[sail:${g}] ${describeHook(hook)}`);
+    },
   });
 }
 
