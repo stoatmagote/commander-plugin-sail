@@ -23,9 +23,12 @@ import {
 } from "@twitch-commander/plugin";
 import { ServerDispatch } from "./src/dispatch.ts";
 import { buildSailFunctions } from "./src/functions.ts";
+import { annotateHook, LookupStore } from "./src/lookups.ts";
 import type { SailGame, SailHook } from "./src/protocol.ts";
 import { SailServer } from "./src/server.ts";
 import { buildSpawnFunction, SpawnConfirmer } from "./src/spawn.ts";
+
+const LOOKUP_CACHE_KEY = "lookups_cache";
 
 const DEFAULT_SOH_PORT = 43384;
 const DEFAULT_S2H_PORT = 43385;
@@ -40,6 +43,10 @@ const servers = new Map<SailGame, SailServer>();
 // Confirms spawns from OnActorInit hooks. Recreated each setup so a re-enable
 // starts clean; every hook is fed to it.
 let confirmer: SpawnConfirmer | undefined;
+
+// Resolves raw ids to names in hook logs. Bundled tables by default, overlaid
+// with any refreshed set cached in ctx.storage.
+let lookups: LookupStore | undefined;
 
 function stopAll(): void {
   for (const server of servers.values()) server.stop();
@@ -107,6 +114,11 @@ const plugin: Plugin = definePlugin({
       for (const server of servers.values()) server.start();
     };
     confirmer = new SpawnConfirmer();
+
+    // Names for hook ids: bundled tables, plus any cached refresh.
+    lookups = new LookupStore();
+    lookups.applyCache(ctx.storage.get(LOOKUP_CACHE_KEY));
+
     startAll();
 
     // Game-control functions: the building blocks for chat commands.
@@ -143,6 +155,7 @@ const plugin: Plugin = definePlugin({
     stopAll();
     confirmer?.cancelAll();
     confirmer = undefined;
+    lookups = undefined;
   },
 });
 
@@ -155,13 +168,14 @@ function makeServer(ctx: Ctx, game: SailGame, port: number): SailServer {
     log: ctx.log,
     onHook: (g, hook) => {
       confirmer?.deliver(g, hook);
-      ctx.log.debug(`[sail:${g}] ${describeHook(hook)}`);
+      ctx.log.debug(`[sail:${g}] ${renderHook(g, hook)}`);
     },
   });
 }
 
-/** A compact one-line rendering of a hook. Names come with COM-41's lookups. */
-function describeHook(hook: SailHook): string {
+/** A one-line rendering of a hook, with ids resolved to names when we can. */
+function renderHook(game: SailGame, hook: SailHook): string {
+  if (lookups) return annotateHook(game, hook, lookups);
   const fields = Object.entries(hook)
     .filter(([key]) => key !== "type")
     .map(([key, value]) => `${key}=${String(value)}`)

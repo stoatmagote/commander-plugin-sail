@@ -9,7 +9,8 @@
     "test": "deno test",
     "fmt": "deno fmt",
     "lint": "deno lint",
-    "bundle": "deno bundle mod.ts -o sail.plugin.js"
+    "bundle": "deno bundle mod.ts -o sail.plugin.js",
+    "extract-lookups": "deno run -A scripts/extract_lookups.ts"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1",

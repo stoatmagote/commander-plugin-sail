@@ -70,8 +70,27 @@ deno task lint
 deno task bundle    # → sail.plugin.js
 ```
 
-`lookups/` holds generated name tables (COM-41); `scripts/` holds the generators
-that build them from the game source trees.
+### Lookup tables
+
+Hook logs and (later) the `!spawn`/`!give` catalogs resolve raw game ids to
+names using tables generated from the SoH / 2S2H source trees:
+
+```
+deno task extract-lookups
+```
+
+It reads the local source clones — override the roots with `SOH_SRC` / `S2H_SRC`
+env vars; the defaults point at the clones under `Desktop\SoH Sail\` — and
+writes two things from one parse (so they can't drift):
+
+- `lookups/*.json` — the committed, human-readable tables (and what a runtime
+  "refresh" re-fetches);
+- `src/lookups.data.ts` — the same tables, bundled into the plugin so ids
+  resolve to names **offline, with no network**.
+
+`src/lookups.ts` layers a refreshed/cached set (from `ctx.storage`) over the
+bundled baseline; a failed refresh keeps whatever was already loaded. The parser
+port lives in `scripts/parsers.ts`.
 
 ## License
 
