@@ -289,12 +289,14 @@ Deno.test("AC: multi works with only one game running (mirror scenario)", async 
   ], "only the connected game got its command; nothing failed");
 });
 
-Deno.test("multi: multiple lines send multiple commands per game (mirror)", async () => {
+Deno.test("multi: semicolons (or newlines) send multiple commands per game (mirror)", async () => {
   const { dispatch, sent } = fakeDispatch(["2s2h"]); // only 2S2H up
   const res = await fns(dispatch).get("multi")!.run(ctxOf({
-    soh_command: "set gMirroredWorldMode 1\nset gMirroredWorld 1",
+    // Semicolon-separated (what fits a single-line editor field), with a
+    // stray space to prove trimming.
+    soh_command: "set gMirroredWorldMode 1; set gMirroredWorld 1",
     s2h_command:
-      "set gModes.MirroredWorld.Mode 1\nset gModes.MirroredWorld.State 1",
+      "set gModes.MirroredWorld.Mode 1 ; set gModes.MirroredWorld.State 1",
   }));
   assert(res.ok, "succeeds on the one connected game");
   // Only 2S2H is connected, and it gets BOTH of its CVar commands, in order.

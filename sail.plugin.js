@@ -117,7 +117,7 @@ var fail = (error) => ({
   error
 });
 function splitCommands(raw) {
-  return (raw ?? "").split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+  return (raw ?? "").split(/[;\n]/).map((line) => line.trim()).filter((line) => line.length > 0);
 }
 function targetParam() {
   return {
@@ -173,7 +173,7 @@ function buildSailFunctions(deps) {
     {
       id: "multi",
       name: "Per-game command",
-      description: "Run one or more console commands on each game, with optional per-game overrides. Sends only to connected games and succeeds if at least one accepts \u2014 so one command works whether SoH, 2S2H, or both are running. Put one console command per line; use this whenever the commands differ between the games (e.g. mirror world, which needs two CVars per game).",
+      description: "Run one or more console commands on each game, with optional per-game overrides. Separate multiple commands with a semicolon (;). Sends only to connected games and succeeds if at least one accepts \u2014 so one command works whether SoH, 2S2H, or both are running. Use this whenever the commands differ between the games (e.g. mirror world, which needs two CVars per game).",
       requires: {
         account: "none"
       },
@@ -182,19 +182,19 @@ function buildSailFunctions(deps) {
           key: "command",
           label: "Commands (both games)",
           type: "string",
-          description: "One console command per line, sent to any connected game without a per-game override below. Leave blank if every game has its own."
+          description: "Console command(s) \u2014 separate several with a semicolon (;) \u2014 sent to any connected game without a per-game override below. Leave blank if every game has its own."
         },
         {
           key: "soh_command",
           label: "SoH commands (override)",
           type: "string",
-          description: "One console command per line, sent to SoH."
+          description: "Console command(s) for SoH; separate several with a semicolon (;)."
         },
         {
           key: "s2h_command",
           label: "2S2H commands (override)",
           type: "string",
-          description: "One console command per line, sent to 2S2H."
+          description: "Console command(s) for 2S2H; separate several with a semicolon (;)."
         }
       ],
       run: async (ctx) => {
