@@ -236,6 +236,86 @@ Deno.test("teleport rejects a non-numeric entrance", async () => {
   assertEquals(sent.length, 0);
 });
 
+// ---- sail.multi (per-game payloads, one-game-is-enough) ----
+
+Deno.test("multi: a base command reaches every connected game", async () => {
+  const { dispatch, sent } = fakeDispatch();
+  const res = await fns(dispatch).get("multi")!.run(ctxOf({ command: "heal" }));
+  assert(res.ok);
+  assertEquals(sent, [
+    { game: "soh", body: { type: "command", command: "heal" } },
+    { game: "2s2h", body: { type: "command", command: "heal" } },
+  ]);
+});
+
+Deno.test("multi: per-game overrides send each game its own text", async () => {
+  const { dispatch, sent } = fakeDispatch();
+  const res = await fns(dispatch).get("multi")!.run(ctxOf({
+    soh_command: "set gMirroredWorld 1",
+    s2h_command: "set gModes.MirroredWorld.Mode 1",
+  }));
+  assert(res.ok);
+  assertEquals(sent, [
+    { game: "soh", body: { type: "command", command: "set gMirroredWorld 1" } },
+    {
+      game: "2s2h",
+      body: { type: "command", command: "set gModes.MirroredWorld.Mode 1" },
+    },
+  ]);
+});
+
+Deno.test("multi: an override wins over the base per game", async () => {
+  const { dispatch, sent } = fakeDispatch();
+  await fns(dispatch).get("multi")!.run(ctxOf({
+    command: "shared",
+    soh_command: "soh only",
+  }));
+  assertEquals(sent, [
+    { game: "soh", body: { type: "command", command: "soh only" } },
+    { game: "2s2h", body: { type: "command", command: "shared" } },
+  ]);
+});
+
+Deno.test("AC: multi works with only one game running (mirror scenario)", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh"]); // 2S2H is closed
+  const res = await fns(dispatch).get("multi")!.run(ctxOf({
+    soh_command: "set gMirroredWorld 1",
+    s2h_command: "set gModes.MirroredWorld.Mode 1",
+  }));
+  assert(res.ok, "succeeds even though 2S2H is offline");
+  if (res.ok) assertEquals(res.out?.games, "soh");
+  assertEquals(sent, [
+    { game: "soh", body: { type: "command", command: "set gMirroredWorld 1" } },
+  ], "only the connected game got its command; nothing failed");
+});
+
+Deno.test("multi: a game with no payload is skipped, not failed", async () => {
+  const { dispatch, sent } = fakeDispatch(); // both connected
+  const res = await fns(dispatch).get("multi")!.run(
+    ctxOf({ soh_command: "spawn 25" }), // nothing for 2S2H
+  );
+  assert(res.ok);
+  assertEquals(sent, [
+    { game: "soh", body: { type: "command", command: "spawn 25" } },
+  ]);
+});
+
+Deno.test("multi: fails (refunds) only when nothing could be sent", async () => {
+  // Both games have payloads but neither is connected.
+  const offline = fakeDispatch([]);
+  const down = await fns(offline.dispatch).get("multi")!.run(
+    ctxOf({ soh_command: "a", s2h_command: "b" }),
+  );
+  assertEquals(down.ok, false);
+  assertEquals(offline.sent.length, 0);
+
+  // Nothing to run at all.
+  const empty = fakeDispatch();
+  const blank = await fns(empty.dispatch).get("multi")!.run(ctxOf({}));
+  assertEquals(blank.ok, false);
+  assertEquals(empty.sent.length, 0);
+});
+
 Deno.test("an unknown target falls back to any-connected", async () => {
   const { dispatch, sent } = fakeDispatch(["2s2h"]);
   const res = await fns(dispatch).get("command")!.run(

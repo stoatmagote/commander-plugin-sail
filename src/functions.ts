@@ -146,6 +146,64 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
     },
 
     {
+      id: "multi",
+      name: "Per-game command",
+      description:
+        "Run a console command on each game, with optional per-game overrides. Sends only to connected games and succeeds if at least one accepts — so one command works whether SoH, 2S2H, or both are running. Use this whenever the console command differs between the games (e.g. mirror world).",
+      requires: { account: "none" },
+      params: [
+        {
+          key: "command",
+          label: "Command (both games)",
+          type: "string",
+          description:
+            "Sent to any connected game without a per-game override below. Leave blank if every game has its own.",
+        },
+        {
+          key: "soh_command",
+          label: "SoH command (override)",
+          type: "string",
+        },
+        {
+          key: "s2h_command",
+          label: "2S2H command (override)",
+          type: "string",
+        },
+      ],
+      run: async (ctx) => {
+        const base = (ctx.params.command ?? "").trim();
+        const forGame: Record<SailGame, string> = {
+          soh: (ctx.params.soh_command ?? "").trim() || base,
+          "2s2h": (ctx.params.s2h_command ?? "").trim() || base,
+        };
+
+        // A game participates only if it has something to run.
+        const wanted = (["soh", "2s2h"] as SailGame[]).filter((g) =>
+          forGame[g] !== ""
+        );
+        if (wanted.length === 0) return fail("no command was given");
+
+        const live = wanted.filter(isConnected);
+        if (live.length === 0) {
+          return fail(
+            describeOffline(wanted.length === 1 ? wanted[0] : "both"),
+          );
+        }
+
+        const results = await Promise.all(
+          live.map(async (game) => ({
+            game,
+            status: await dispatch.send(game, {
+              type: "command",
+              command: forGame[game],
+            }),
+          })),
+        );
+        return summarize(results);
+      },
+    },
+
+    {
       id: "effect",
       name: "Apply or remove an effect",
       description:
