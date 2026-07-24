@@ -38,6 +38,12 @@ export const TAB_HTML: string = String.raw`
 <div class="wrap">
   <div class="status" id="status"><span class="muted">connecting…</span></div>
 
+  <div class="bar">
+    <button id="launch-soh">▶ Launch SoH</button>
+    <button id="launch-2s2h">▶ Launch 2S2H</button>
+    <span id="launchMsg" class="muted"></span>
+  </div>
+
   <div class="cap">Catalog</div>
   <div class="bar">
     <button id="tab-actor" class="sel" data-kind="actor">Actors</button>
@@ -69,6 +75,16 @@ export const TAB_HTML: string = String.raw`
     var GAME = { soh: "SoH", "2s2h": "2S2H" };
 
     function req(msg) { return commander.request(msg); }
+
+    function launch(game, label) {
+      $("launchMsg").textContent = "launching " + label + "…";
+      req({ type: "launch", game: game }).then(function (res) {
+        if (!res) { $("launchMsg").textContent = "no response"; return; }
+        $("launchMsg").textContent = res.ok ? (label + " launched") : (res.error || "launch failed");
+      });
+    }
+    $("launch-soh").addEventListener("click", function () { launch("soh", "SoH"); });
+    $("launch-2s2h").addEventListener("click", function () { launch("2s2h", "2S2H"); });
 
     function renderStatus(games) {
       var el = $("status");

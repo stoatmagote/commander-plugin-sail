@@ -9,6 +9,7 @@
 //   - src/spawn.ts            spawn with OnActorInit confirmation
 //   - src/lookups.ts          id → name resolution (bundled tables)
 //   - src/catalog.ts          the spawn/give catalog + !spawn / !give commands
+//   - src/launcher.ts         "run SoH / 2S2H" buttons
 //   - src/tab.ts              the Sail tab (status, catalog grid, hook log)
 //
 // Sail is backwards from most integrations: the *games* connect to us, so this
@@ -30,6 +31,7 @@ import { SailServer } from "./src/server.ts";
 import { buildSpawnFunction, SpawnConfirmer, Spawner } from "./src/spawn.ts";
 import { Catalog } from "./src/catalog.ts";
 import { registerCatalogCommands } from "./src/catalog_commands.ts";
+import { launchGame } from "./src/launcher.ts";
 import { TAB_HTML } from "./src/tab.ts";
 
 const LOOKUP_CACHE_KEY = "lookups_cache";
@@ -95,6 +97,22 @@ const plugin: Plugin = definePlugin({
         default: DEFAULT_CONFIRM_WINDOW_MS,
         description:
           "How long to wait for a spawn's OnActorInit before refunding.",
+      },
+      {
+        key: "soh_exe",
+        label: "Ship of Harkinian executable",
+        type: "string",
+        default: "",
+        description:
+          "Full path to soh.exe, for the Sail tab's Launch button. It runs with the game's own folder as the working directory.",
+      },
+      {
+        key: "s2h_exe",
+        label: "2 Ship 2 Harkinian executable",
+        type: "string",
+        default: "",
+        description:
+          "Full path to 2ship.exe, for the Sail tab's Launch button.",
       },
       {
         key: "lookups_url",
@@ -239,6 +257,16 @@ async function handleTabRequest(
       return { games: statusGames() };
     case "recent":
       return { hooks: [...recentHooks] };
+    case "launch": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      const exe = String(
+        ctx.settings.get(game === "soh" ? "soh_exe" : "s2h_exe") || "",
+      );
+      const result = launchGame(exe);
+      if (result.ok) ctx.log.info(`launched ${game}: ${exe}`);
+      else ctx.log.warn(`launch ${game} failed: ${result.error}`);
+      return result;
+    }
     case "rows": {
       const kind = req.kind === "item" ? "item" : "actor";
       const filter = typeof req.filter === "string" ? req.filter : "";

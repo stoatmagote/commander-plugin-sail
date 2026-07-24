@@ -9688,6 +9688,54 @@ function connectHint(games) {
   return `${names || "the game"} isn't connected.`;
 }
 
+// src/launcher.ts
+var realLaunchHost = {
+  stat: (path) => {
+    Deno.statSync(path);
+  },
+  spawn: (path, cwd) => {
+    new Deno.Command(path, {
+      cwd,
+      stdout: "null",
+      stderr: "null",
+      stdin: "null"
+    }).spawn();
+  }
+};
+function dirOf(p) {
+  const norm = p.replace(/\\/g, "/");
+  const idx = norm.lastIndexOf("/");
+  return idx === -1 ? "." : norm.slice(0, idx);
+}
+function launchGame(exePath, host = realLaunchHost) {
+  const path = (exePath ?? "").trim();
+  if (!path) {
+    return {
+      ok: false,
+      error: "no executable path set \u2014 add one in the plugin settings"
+    };
+  }
+  try {
+    host.stat(path);
+  } catch {
+    return {
+      ok: false,
+      error: `not found: ${path}`
+    };
+  }
+  try {
+    host.spawn(path, dirOf(path));
+    return {
+      ok: true
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
 // src/tab.ts
 var _a;
 var TAB_HTML = String.raw(_a || (_a = __template([`
@@ -9723,6 +9771,12 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
 <div class="wrap">
   <div class="status" id="status"><span class="muted">connecting\u2026</span></div>
 
+  <div class="bar">
+    <button id="launch-soh">\u25B6 Launch SoH</button>
+    <button id="launch-2s2h">\u25B6 Launch 2S2H</button>
+    <span id="launchMsg" class="muted"></span>
+  </div>
+
   <div class="cap">Catalog</div>
   <div class="bar">
     <button id="tab-actor" class="sel" data-kind="actor">Actors</button>
@@ -9754,6 +9808,16 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
     var GAME = { soh: "SoH", "2s2h": "2S2H" };
 
     function req(msg) { return commander.request(msg); }
+
+    function launch(game, label) {
+      $("launchMsg").textContent = "launching " + label + "\u2026";
+      req({ type: "launch", game: game }).then(function (res) {
+        if (!res) { $("launchMsg").textContent = "no response"; return; }
+        $("launchMsg").textContent = res.ok ? (label + " launched") : (res.error || "launch failed");
+      });
+    }
+    $("launch-soh").addEventListener("click", function () { launch("soh", "SoH"); });
+    $("launch-2s2h").addEventListener("click", function () { launch("2s2h", "2S2H"); });
 
     function renderStatus(games) {
       var el = $("status");
@@ -9920,6 +9984,20 @@ var plugin = definePlugin({
         description: "How long to wait for a spawn's OnActorInit before refunding."
       },
       {
+        key: "soh_exe",
+        label: "Ship of Harkinian executable",
+        type: "string",
+        default: "",
+        description: "Full path to soh.exe, for the Sail tab's Launch button. It runs with the game's own folder as the working directory."
+      },
+      {
+        key: "s2h_exe",
+        label: "2 Ship 2 Harkinian executable",
+        type: "string",
+        default: "",
+        description: "Full path to 2ship.exe, for the Sail tab's Launch button."
+      },
+      {
         key: "lookups_url",
         label: "Lookups refresh URL",
         type: "string",
@@ -10056,6 +10134,14 @@ async function handleTabRequest(ctx, catalog, raw) {
           ...recentHooks
         ]
       };
+    case "launch": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      const exe = String(ctx.settings.get(game === "soh" ? "soh_exe" : "s2h_exe") || "");
+      const result = launchGame(exe);
+      if (result.ok) ctx.log.info(`launched ${game}: ${exe}`);
+      else ctx.log.warn(`launch ${game} failed: ${result.error}`);
+      return result;
+    }
     case "rows": {
       const kind = req.kind === "item" ? "item" : "actor";
       const filter = typeof req.filter === "string" ? req.filter : "";
