@@ -289,6 +289,27 @@ Deno.test("AC: multi works with only one game running (mirror scenario)", async 
   ], "only the connected game got its command; nothing failed");
 });
 
+Deno.test("multi: multiple lines send multiple commands per game (mirror)", async () => {
+  const { dispatch, sent } = fakeDispatch(["2s2h"]); // only 2S2H up
+  const res = await fns(dispatch).get("multi")!.run(ctxOf({
+    soh_command: "set gMirroredWorldMode 1\nset gMirroredWorld 1",
+    s2h_command:
+      "set gModes.MirroredWorld.Mode 1\nset gModes.MirroredWorld.State 1",
+  }));
+  assert(res.ok, "succeeds on the one connected game");
+  // Only 2S2H is connected, and it gets BOTH of its CVar commands, in order.
+  assertEquals(sent, [
+    {
+      game: "2s2h",
+      body: { type: "command", command: "set gModes.MirroredWorld.Mode 1" },
+    },
+    {
+      game: "2s2h",
+      body: { type: "command", command: "set gModes.MirroredWorld.State 1" },
+    },
+  ]);
+});
+
 Deno.test("multi: a game with no payload is skipped, not failed", async () => {
   const { dispatch, sent } = fakeDispatch(); // both connected
   const res = await fns(dispatch).get("multi")!.run(

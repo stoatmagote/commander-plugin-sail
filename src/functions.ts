@@ -88,6 +88,14 @@ const ok = (out?: Record<string, unknown>): FunctionResult =>
   out ? { ok: true, out } : { ok: true };
 const fail = (error: string): FunctionResult => ({ ok: false, error });
 
+/** Split a multi-line field into one console command per non-blank line. */
+export function splitCommands(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 /** The target param, shared by the functions that accept one. */
 export function targetParam() {
   return {
@@ -149,37 +157,41 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
       id: "multi",
       name: "Per-game command",
       description:
-        "Run a console command on each game, with optional per-game overrides. Sends only to connected games and succeeds if at least one accepts — so one command works whether SoH, 2S2H, or both are running. Use this whenever the console command differs between the games (e.g. mirror world).",
+        "Run one or more console commands on each game, with optional per-game overrides. Sends only to connected games and succeeds if at least one accepts — so one command works whether SoH, 2S2H, or both are running. Put one console command per line; use this whenever the commands differ between the games (e.g. mirror world, which needs two CVars per game).",
       requires: { account: "none" },
       params: [
         {
           key: "command",
-          label: "Command (both games)",
+          label: "Commands (both games)",
           type: "string",
           description:
-            "Sent to any connected game without a per-game override below. Leave blank if every game has its own.",
+            "One console command per line, sent to any connected game without a per-game override below. Leave blank if every game has its own.",
         },
         {
           key: "soh_command",
-          label: "SoH command (override)",
+          label: "SoH commands (override)",
           type: "string",
+          description: "One console command per line, sent to SoH.",
         },
         {
           key: "s2h_command",
-          label: "2S2H command (override)",
+          label: "2S2H commands (override)",
           type: "string",
+          description: "One console command per line, sent to 2S2H.",
         },
       ],
       run: async (ctx) => {
-        const base = (ctx.params.command ?? "").trim();
-        const forGame: Record<SailGame, string> = {
-          soh: (ctx.params.soh_command ?? "").trim() || base,
-          "2s2h": (ctx.params.s2h_command ?? "").trim() || base,
+        const base = splitCommands(ctx.params.command);
+        const soh = splitCommands(ctx.params.soh_command);
+        const s2h = splitCommands(ctx.params.s2h_command);
+        const forGame: Record<SailGame, string[]> = {
+          soh: soh.length > 0 ? soh : base,
+          "2s2h": s2h.length > 0 ? s2h : base,
         };
 
         // A game participates only if it has something to run.
         const wanted = (["soh", "2s2h"] as SailGame[]).filter((g) =>
-          forGame[g] !== ""
+          forGame[g].length > 0
         );
         if (wanted.length === 0) return fail("no command was given");
 
@@ -190,14 +202,23 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
           );
         }
 
+        // Each game gets all its commands, in order; it "landed" only if every
+        // one was accepted. The step succeeds if any game fully landed.
         const results = await Promise.all(
-          live.map(async (game) => ({
-            game,
-            status: await dispatch.send(game, {
-              type: "command",
-              command: forGame[game],
-            }),
-          })),
+          live.map(async (game) => {
+            let allOk = true;
+            for (const command of forGame[game]) {
+              const status = await dispatch.send(game, {
+                type: "command",
+                command,
+              });
+              if (status !== "success") allOk = false;
+            }
+            return {
+              game,
+              status: (allOk ? "success" : "failure") as ResultStatus,
+            };
+          }),
         );
         return summarize(results);
       },
