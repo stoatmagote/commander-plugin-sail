@@ -3,17 +3,18 @@
 //
 // Drop this folder (or the bundled single file) into Commander's plugins/
 // directory. This entry wires the pure modules to Commander's ctx:
-//   - src/protocol.ts  the Sail wire format (NUL-delimited JSON) + framing
-//   - src/client.ts    one connected game: correlated sends, retries, hooks
-//   - src/server.ts    the TCP listener each game dials into
+//   - src/protocol.ts        the Sail wire format (NUL-delimited JSON) + framing
+//   - src/client.ts/server.ts the TCP listeners each game dials into
+//   - src/functions.ts        command-engine functions (command / effect / …)
+//   - src/spawn.ts            spawn with OnActorInit confirmation
+//   - src/lookups.ts          id → name resolution (bundled tables)
+//   - src/catalog.ts          the spawn/give catalog + !spawn / !give commands
+//   - src/tab.ts              the Sail tab (status, catalog grid, hook log)
 //
 // Sail is backwards from most integrations: the *games* connect to us, so this
 // plugin listens on two ports (SoH 43384, 2S2H 43385 by default, both
 // settings). Listeners start in setup and close in teardown, so disabling the
 // plugin frees the ports and re-enabling works without restarting Commander.
-//
-// Still to come: game-control functions (COM-40), spawn confirmation (COM-45),
-// lookup tables (COM-41), catalog commands + the Sail tab (COM-50).
 
 import {
   type Ctx,
@@ -26,27 +27,28 @@ import { buildSailFunctions } from "./src/functions.ts";
 import { annotateHook, LookupStore } from "./src/lookups.ts";
 import type { SailGame, SailHook } from "./src/protocol.ts";
 import { SailServer } from "./src/server.ts";
-import { buildSpawnFunction, SpawnConfirmer } from "./src/spawn.ts";
+import { buildSpawnFunction, SpawnConfirmer, Spawner } from "./src/spawn.ts";
+import { Catalog } from "./src/catalog.ts";
+import { registerCatalogCommands } from "./src/catalog_commands.ts";
+import { TAB_HTML } from "./src/tab.ts";
 
 const LOOKUP_CACHE_KEY = "lookups_cache";
+const OVERRIDES_KEY = "catalog_overrides";
 
 const DEFAULT_SOH_PORT = 43384;
 const DEFAULT_S2H_PORT = 43385;
 const DEFAULT_CONFIRM_WINDOW_MS = 1500;
+const MAX_RECENT_HOOKS = 60;
 
 // Held across setup/teardown: these own OS ports, which ctx's disposables can't
-// close for us. The map is mutated in place rather than replaced, so the
-// dispatch handed to the functions keeps seeing the current servers after a
-// port change restarts them.
+// close for us. The map is mutated in place, so the dispatch handed to the
+// functions keeps seeing the current servers after a port change restarts them.
 const servers = new Map<SailGame, SailServer>();
 
-// Confirms spawns from OnActorInit hooks. Recreated each setup so a re-enable
-// starts clean; every hook is fed to it.
+// Recreated each setup so a re-enable starts clean.
 let confirmer: SpawnConfirmer | undefined;
-
-// Resolves raw ids to names in hook logs. Bundled tables by default, overlaid
-// with any refreshed set cached in ctx.storage.
 let lookups: LookupStore | undefined;
+const recentHooks: string[] = [];
 
 function stopAll(): void {
   for (const server of servers.values()) server.stop();
@@ -56,7 +58,7 @@ function stopAll(): void {
 const plugin: Plugin = definePlugin({
   id: "sail",
   name: "Sail Game Control",
-  version: "0.2.0",
+  version: "0.3.0",
   update: "github:stoatmagote/commander-plugin-sail",
   apiVersion: 1,
 
@@ -94,53 +96,105 @@ const plugin: Plugin = definePlugin({
         description:
           "How long to wait for a spawn's OnActorInit before refunding.",
       },
+      {
+        key: "lookups_url",
+        label: "Lookups refresh URL",
+        type: "string",
+        default: "",
+        description:
+          "Base URL the Sail tab's Refresh button fetches <category>_<game>.json from. Leave blank to stick with the bundled tables.",
+      },
     ]);
 
-    const port = (key: string, fallback: number) => {
-      const raw = Number(ctx.settings.get(key));
-      return Number.isInteger(raw) && raw > 0 && raw < 65536 ? raw : fallback;
-    };
-
-    const startAll = () => {
-      stopAll();
-      servers.set(
-        "soh",
-        makeServer(ctx, "soh", port("soh_port", DEFAULT_SOH_PORT)),
-      );
-      servers.set(
-        "2s2h",
-        makeServer(ctx, "2s2h", port("s2h_port", DEFAULT_S2H_PORT)),
-      );
-      for (const server of servers.values()) server.start();
-    };
     confirmer = new SpawnConfirmer();
 
     // Names for hook ids: bundled tables, plus any cached refresh.
     lookups = new LookupStore();
     lookups.applyCache(ctx.storage.get(LOOKUP_CACHE_KEY));
 
+    // The spawn/give catalog, with the streamer's saved enable/price overrides.
+    const catalog = new Catalog();
+    catalog.setOverrides(ctx.storage.get(OVERRIDES_KEY));
+
+    const confirmEnabled = () => ctx.settings.get("spawn_confirm") === true;
+    const windowMs = () => {
+      const raw = Number(ctx.settings.get("spawn_confirm_window_ms"));
+      return raw > 0 ? raw : DEFAULT_CONFIRM_WINDOW_MS;
+    };
+
+    const pushStatus = () =>
+      ctx.ui.send({ type: "status", games: statusGames() });
+    const recordHook = (game: SailGame, hook: SailHook) => {
+      confirmer?.deliver(game, hook);
+      const line = `[${game}] ${renderHook(game, hook)}`;
+      recentHooks.push(line);
+      while (recentHooks.length > MAX_RECENT_HOOKS) recentHooks.shift();
+      ctx.log.debug(`[sail:${game}] ${renderHook(game, hook)}`);
+      ctx.ui.send({ type: "hook", line });
+    };
+
+    const port = (key: string, fallback: number) => {
+      const raw = Number(ctx.settings.get(key));
+      return Number.isInteger(raw) && raw > 0 && raw < 65536 ? raw : fallback;
+    };
+    const startAll = () => {
+      stopAll();
+      for (
+        const [game, key] of [
+          ["soh", "soh_port"],
+          ["2s2h", "s2h_port"],
+        ] as [SailGame, string][]
+      ) {
+        const fallback = game === "soh" ? DEFAULT_SOH_PORT : DEFAULT_S2H_PORT;
+        servers.set(
+          game,
+          new SailServer({
+            game,
+            port: port(key, fallback),
+            log: ctx.log,
+            onHook: recordHook,
+            onConnect: pushStatus,
+            onDisconnect: pushStatus,
+          }),
+        );
+      }
+      for (const server of servers.values()) server.start();
+    };
     startAll();
 
-    // Game-control functions: the building blocks for chat commands.
+    // Functions + the spawn function share one Spawner (and its confirmer +
+    // 2S2H subscription refcount).
     const dispatch = new ServerDispatch(servers);
+    const spawner = new Spawner(dispatch, confirmer);
     for (const spec of buildSailFunctions({ dispatch })) {
       ctx.functions.register(spec);
     }
-    ctx.functions.register(buildSpawnFunction({
+    ctx.functions.register(
+      buildSpawnFunction({ dispatch, spawner, confirmEnabled, windowMs }),
+    );
+
+    // The named catalog commands.
+    registerCatalogCommands(ctx, {
+      catalog,
       dispatch,
-      confirmer,
-      confirmEnabled: () => ctx.settings.get("spawn_confirm") === true,
-      windowMs: () => {
-        const raw = Number(ctx.settings.get("spawn_confirm_window_ms"));
-        return raw > 0 ? raw : DEFAULT_CONFIRM_WINDOW_MS;
-      },
-    }));
+      spawner,
+      points: ctx.points,
+      chat: ctx.chat,
+      confirmEnabled,
+      windowMs,
+      log: ctx.log,
+    });
+
+    // The Sail tab.
+    ctx.ui.registerTab({ id: "sail", title: "Sail", html: TAB_HTML });
+    ctx.ui.onRequest((raw) => handleTabRequest(ctx, catalog, raw));
 
     // A port change has to rebind, or the games would dial a stale port.
     ctx.settings.onChange((key) => {
       if (key === "soh_port" || key === "s2h_port") {
         ctx.log.info("port changed — restarting the Sail listeners");
         startAll();
+        pushStatus();
       }
     });
 
@@ -156,21 +210,70 @@ const plugin: Plugin = definePlugin({
     confirmer?.cancelAll();
     confirmer = undefined;
     lookups = undefined;
+    recentHooks.length = 0;
   },
 });
 
 export default plugin;
 
-function makeServer(ctx: Ctx, game: SailGame, port: number): SailServer {
-  return new SailServer({
-    game,
-    port,
-    log: ctx.log,
-    onHook: (g, hook) => {
-      confirmer?.deliver(g, hook);
-      ctx.log.debug(`[sail:${g}] ${renderHook(g, hook)}`);
-    },
-  });
+/** Per-game status for the tab. */
+function statusGames() {
+  return [...servers.values()].map((server) => ({
+    game: server.game,
+    connected: server.connected,
+    listening: server.listening,
+    port: server.port,
+    error: server.error,
+  }));
+}
+
+/** Handle a request from the Sail tab. */
+async function handleTabRequest(
+  ctx: Ctx,
+  catalog: Catalog,
+  raw: unknown,
+): Promise<unknown> {
+  const req = (raw ?? {}) as Record<string, unknown>;
+  switch (req.type) {
+    case "status":
+      return { games: statusGames() };
+    case "recent":
+      return { hooks: [...recentHooks] };
+    case "rows": {
+      const kind = req.kind === "item" ? "item" : "actor";
+      const filter = typeof req.filter === "string" ? req.filter : "";
+      const rows = catalog.rows(kind, filter);
+      const total = kind === "actor" ? catalog.actorCount : catalog.itemCount;
+      return { rows, total };
+    }
+    case "toggle": {
+      const kind = req.entryKind === "item" ? "item" : "actor";
+      catalog.setOverride(kind, String(req.key), {
+        enabled: req.enabled === true,
+      });
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return { ok: true };
+    }
+    case "price": {
+      const kind = req.entryKind === "item" ? "item" : "actor";
+      const price = typeof req.price === "number" && req.price >= 0
+        ? req.price
+        : undefined;
+      catalog.setOverride(kind, String(req.key), { price });
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return { ok: true };
+    }
+    case "refresh-lookups": {
+      const url = String(ctx.settings.get("lookups_url") || "").trim();
+      if (!url) return { error: "set a Lookups refresh URL in settings first" };
+      if (!lookups) return { error: "not ready" };
+      const results = await lookups.refresh((u) => fetch(u), url);
+      ctx.storage.set(LOOKUP_CACHE_KEY, lookups.snapshot());
+      return { results };
+    }
+    default:
+      return { error: "unknown request" };
+  }
 }
 
 /** A one-line rendering of a hook, with ids resolved to names when we can. */

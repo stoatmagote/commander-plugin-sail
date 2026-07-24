@@ -135,9 +135,98 @@ export class SpawnConfirmer {
   }
 }
 
+export interface SpawnOptions {
+  verb?: string;
+  extra?: string;
+  confirm: boolean;
+  windowMs: number;
+}
+
+/**
+ * Spawns actors and (optionally) confirms them, sharing the SpawnConfirmer and
+ * the 2S2H OnActorInit subscription refcount across every caller — both
+ * sail.spawn and the catalog !spawn command go through one Spawner.
+ */
+export class Spawner {
+  #dispatch: SailDispatch;
+  #confirmer: SpawnConfirmer;
+  // 2S2H doesn't push OnActorInit by default (too chatty), so we subscribe to
+  // it filtered to the actor id, and unsubscribe when the last concurrent spawn
+  // of that id finishes. Refcounted per actor id.
+  #s2hSubs = new Map<number, number>();
+
+  constructor(dispatch: SailDispatch, confirmer: SpawnConfirmer) {
+    this.#dispatch = dispatch;
+    this.#confirmer = confirmer;
+  }
+
+  /** Spawn one actor on one game; resolves true only if it was confirmed. */
+  async spawn(
+    game: SailGame,
+    actorId: number,
+    opts: SpawnOptions,
+  ): Promise<boolean> {
+    const command = buildSpawnCommand(
+      opts.verb ?? "spawn",
+      actorId,
+      opts.extra ?? "",
+    );
+    if (!opts.confirm) {
+      const status = await this.#dispatch.send(game, {
+        type: "command",
+        command,
+      });
+      return status === "success";
+    }
+
+    if (game === "2s2h") await this.#acquire2s2h(actorId);
+    try {
+      // Register the wait BEFORE sending, so a fast OnActorInit isn't missed.
+      const wait = this.#confirmer.await(game, actorId, opts.windowMs);
+      const status = await this.#dispatch.send(game, {
+        type: "command",
+        command,
+      });
+      if (status !== "success") {
+        wait.cancel(); // parse/refused — don't burn the whole window
+        return false;
+      }
+      return await wait.confirmed;
+    } finally {
+      if (game === "2s2h") await this.#release2s2h(actorId);
+    }
+  }
+
+  async #acquire2s2h(actorId: number): Promise<void> {
+    const count = this.#s2hSubs.get(actorId) ?? 0;
+    this.#s2hSubs.set(actorId, count + 1);
+    if (count === 0) {
+      await this.#dispatch.send("2s2h", {
+        type: "subscribe",
+        eventName: "OnActorInit",
+        eventIdFilter: actorId,
+      });
+    }
+  }
+
+  async #release2s2h(actorId: number): Promise<void> {
+    const count = (this.#s2hSubs.get(actorId) ?? 1) - 1;
+    if (count <= 0) {
+      this.#s2hSubs.delete(actorId);
+      await this.#dispatch.send("2s2h", {
+        type: "unsubscribe",
+        eventName: "OnActorInit",
+        eventIdFilter: actorId,
+      });
+    } else {
+      this.#s2hSubs.set(actorId, count);
+    }
+  }
+}
+
 export interface SpawnFnDeps {
   dispatch: SailDispatch;
-  confirmer: SpawnConfirmer;
+  spawner: Spawner;
   /** Whether to wait for OnActorInit (a plugin setting; read fresh). */
   confirmEnabled: () => boolean;
   /** How long to wait for confirmation, ms (a plugin setting; read fresh). */
@@ -150,64 +239,10 @@ const ok = (out: Record<string, unknown>): FunctionResult => ({
 });
 const fail = (error: string): FunctionResult => ({ ok: false, error });
 
-/** Build the sail.spawn function. */
+/** Build the sail.spawn function (raw actor id; the named catalog is !spawn). */
 export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
-  const { dispatch, confirmer } = deps;
+  const { dispatch, spawner } = deps;
   const isConnected = (game: SailGame) => dispatch.connected(game);
-
-  // 2S2H doesn't push OnActorInit by default (too chatty), so we subscribe to
-  // it filtered to the actor id being spawned, and unsubscribe when the last
-  // concurrent spawn of that id finishes. Refcounted per actor id.
-  const s2hSubs = new Map<number, number>();
-  const acquire2s2h = async (actorId: number) => {
-    const count = s2hSubs.get(actorId) ?? 0;
-    s2hSubs.set(actorId, count + 1);
-    if (count === 0) {
-      await dispatch.send("2s2h", {
-        type: "subscribe",
-        eventName: "OnActorInit",
-        eventIdFilter: actorId,
-      });
-    }
-  };
-  const release2s2h = async (actorId: number) => {
-    const count = (s2hSubs.get(actorId) ?? 1) - 1;
-    if (count <= 0) {
-      s2hSubs.delete(actorId);
-      await dispatch.send("2s2h", {
-        type: "unsubscribe",
-        eventName: "OnActorInit",
-        eventIdFilter: actorId,
-      });
-    } else {
-      s2hSubs.set(actorId, count);
-    }
-  };
-
-  async function spawnOne(
-    game: SailGame,
-    actorId: number,
-    command: string,
-  ): Promise<boolean> {
-    if (!deps.confirmEnabled()) {
-      const status = await dispatch.send(game, { type: "command", command });
-      return status === "success";
-    }
-
-    if (game === "2s2h") await acquire2s2h(actorId);
-    try {
-      // Register the wait BEFORE sending, so a fast OnActorInit isn't missed.
-      const wait = confirmer.await(game, actorId, deps.windowMs());
-      const status = await dispatch.send(game, { type: "command", command });
-      if (status !== "success") {
-        wait.cancel(); // parse/refused — don't burn the whole window
-        return false;
-      }
-      return await wait.confirmed;
-    } finally {
-      if (game === "2s2h") await release2s2h(actorId);
-    }
-  }
 
   return {
     id: "spawn",
@@ -241,19 +276,20 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
       if (actorId === null) {
         return fail(`"${ctx.params.actorId}" is not an actor id`);
       }
-      const command = buildSpawnCommand(
-        ctx.params.verb ?? "spawn",
-        actorId,
-        ctx.params.params ?? "",
-      );
 
       const target: SailTarget = readTarget(ctx.params.target);
       const games = liveGames(target, isConnected);
       if (games.length === 0) return fail(describeOffline(target));
 
+      const opts = {
+        verb: ctx.params.verb ?? "spawn",
+        extra: ctx.params.params ?? "",
+        confirm: deps.confirmEnabled(),
+        windowMs: deps.windowMs(),
+      };
       // Every targeted game must confirm; otherwise the viewer is refunded.
       const results = await Promise.all(
-        games.map((game) => spawnOne(game, actorId, command)),
+        games.map((game) => spawner.spawn(game, actorId, opts)),
       );
       if (!results.every(Boolean)) {
         return fail(

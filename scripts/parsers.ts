@@ -86,6 +86,50 @@ export function parseActorTable(source: string): IdMap {
   return parseTable(source, "ACTOR");
 }
 
+export interface ActorEntry {
+  id: number;
+  enumName: string; // e.g. "ACTOR_EN_NIW"
+  displayName: string; // friendly description, or the enum name if none
+}
+
+/**
+ * Like parseActorTable, but keeps each entry's ACTOR_* enum name — needed to
+ * match the same actor across SoH and 2S2H (their numeric ids differ, but the
+ * enum names line up).
+ */
+export function parseActorTableEntries(source: string): ActorEntry[] {
+  const out: ActorEntry[] = [];
+  let running = 0;
+  for (const line of source.split("\n")) {
+    const idxComment = line.match(/\/\*\s*(0x[0-9a-fA-F]+|\d+)\s*\*\//);
+    const index = (idxComment ? parseIntLoose(idxComment[1]) : null) ?? running;
+
+    if (/DEFINE_ACTOR_UNSET\s*\(/.test(line)) {
+      running = index + 1;
+      continue;
+    }
+    const macro = /DEFINE_ACTOR_INTERNAL\s*\(/.test(line)
+      ? "DEFINE_ACTOR_INTERNAL"
+      : "DEFINE_ACTOR";
+    const inner = extractMacroArgs(line, macro);
+    if (inner === null) continue;
+
+    const args = splitArgs(inner);
+    const enumArg = args.find((a) => /^ACTOR_\w+/.test(a.trim()));
+    if (!enumArg) {
+      running = index + 1;
+      continue;
+    }
+    const quoted = inner.match(/"([^"]*)"/g);
+    const displayName = quoted && quoted.length > 0
+      ? quoted[quoted.length - 1].replace(/"/g, "")
+      : enumArg.trim();
+    out.push({ id: index, enumName: enumArg.trim(), displayName });
+    running = index + 1;
+  }
+  return out;
+}
+
 /** Shared DEFINE_<KIND>(…) table parser. */
 function parseTable(source: string, kind: "ACTOR" | "SCENE"): IdMap {
   const out: IdMap = {};

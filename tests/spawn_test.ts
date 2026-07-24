@@ -14,6 +14,7 @@ import {
   parseActorId,
   parseSpawnActorId,
   SpawnConfirmer,
+  Spawner,
 } from "../src/spawn.ts";
 
 const actorInit = (actorId: number) => ({ type: "OnActorInit", actorId });
@@ -62,7 +63,7 @@ function spawnFn(
 ) {
   return buildSpawnFunction({
     dispatch,
-    confirmer,
+    spawner: new Spawner(dispatch, confirmer),
     confirmEnabled: () => opts.confirm ?? true,
     windowMs: () => opts.window ?? 1000,
   });
