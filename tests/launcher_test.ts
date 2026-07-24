@@ -1,7 +1,14 @@
 // tests/launcher_test.ts — the game launcher (run SoH / 2S2H buttons).
 
 import { assert, assertEquals } from "@std/assert";
-import { dirOf, launchGame, type LaunchHost } from "../src/launcher.ts";
+import {
+  buildPickerScript,
+  type CommandRunner,
+  dirOf,
+  launchGame,
+  type LaunchHost,
+  makeFilePicker,
+} from "../src/launcher.ts";
 
 function fakeHost(opts: { missing?: boolean; spawnThrows?: boolean } = {}) {
   const spawns: { path: string; cwd: string }[] = [];
@@ -54,4 +61,52 @@ Deno.test("a spawn failure is caught and reported", () => {
   const res = launchGame("C:\\Games\\SoH\\soh.exe", f.host);
   assertEquals(res.ok, false);
   assert(res.error?.includes("spawn failed"));
+});
+
+// ---- Browse file picker ----
+
+function fakeRunner(stdout: string, throws = false): {
+  runner: CommandRunner;
+  calls: { cmd: string; args: string[] }[];
+} {
+  const calls: { cmd: string; args: string[] }[] = [];
+  return {
+    calls,
+    runner: {
+      run: (cmd, args) => {
+        calls.push({ cmd, args });
+        if (throws) return Promise.reject(new Error("no powershell"));
+        return Promise.resolve({ stdout });
+      },
+    },
+  };
+}
+
+Deno.test("buildPickerScript shows an exe dialog and escapes the title", () => {
+  const s = buildPickerScript("Select the Bob's game");
+  assert(s.includes("OpenFileDialog"));
+  assert(s.includes("*.exe"));
+  assert(s.includes("Bob''s game"), "single quotes are doubled for PowerShell");
+});
+
+Deno.test("picker returns the chosen path, trimmed", async () => {
+  const f = fakeRunner("C:\\Games\\SoH\\soh.exe\r\n");
+  const path = await makeFilePicker(f.runner, "windows").pick("t");
+  assertEquals(path, "C:\\Games\\SoH\\soh.exe");
+  assertEquals(f.calls[0].cmd, "powershell");
+  assert(f.calls[0].args.includes("-STA"));
+});
+
+Deno.test("picker returns null when the dialog is cancelled (empty output)", async () => {
+  const f = fakeRunner("");
+  assertEquals(await makeFilePicker(f.runner, "windows").pick("t"), null);
+});
+
+Deno.test("picker is a no-op off Windows, and swallows a runner failure", async () => {
+  const off = fakeRunner("whatever");
+  assertEquals(await makeFilePicker(off.runner, "linux").pick("t"), null);
+  assertEquals(off.calls.length, 0, "nothing run off Windows");
+
+  const broken = fakeRunner("", true);
+  assertEquals(await makeFilePicker(broken.runner, "windows").pick("t"), null);
 });

@@ -9702,6 +9702,47 @@ var realLaunchHost = {
     }).spawn();
   }
 };
+var realRunner = {
+  async run(cmd, args) {
+    const out = await new Deno.Command(cmd, {
+      args,
+      stdout: "piped",
+      stderr: "null"
+    }).output();
+    return {
+      stdout: new TextDecoder().decode(out.stdout)
+    };
+  }
+};
+function buildPickerScript(title) {
+  const safeTitle = title.replace(/'/g, "''");
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms;",
+    "$f = New-Object System.Windows.Forms.OpenFileDialog;",
+    "$f.Filter = 'Executables (*.exe)|*.exe|All files (*.*)|*.*';",
+    `$f.Title = '${safeTitle}';`,
+    "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)",
+    "{ [Console]::Out.Write($f.FileName) }"
+  ].join(" ");
+}
+function makeFilePicker(runner = realRunner, os = Deno.build.os) {
+  return {
+    async pick(title) {
+      if (os !== "windows") return null;
+      try {
+        const { stdout } = await runner.run("powershell", [
+          "-NoProfile",
+          "-STA",
+          "-Command",
+          buildPickerScript(title)
+        ]);
+        return stdout.trim() || null;
+      } catch {
+        return null;
+      }
+    }
+  };
+}
 function dirOf(p) {
   const norm = p.replace(/\\/g, "/");
   const idx = norm.lastIndexOf("/");
@@ -9747,6 +9788,9 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
   .pill.off { color: #9b95ab; }
   .pill.err { border-color: #a6553e; color: #e39b8a; }
   .bar { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap; }
+  .game-row { display: flex; gap: .5rem; align-items: center; margin-bottom: .4rem; }
+  .game-row .launch { white-space: nowrap; }
+  input.path { flex: 1; }
   button, input, select { font: inherit; }
   button { background: #17151d; border: 1px solid #322e3f; color: #e8e5f0; border-radius: 8px; padding: .35rem .7rem; cursor: pointer; }
   button:hover { border-color: #9b6bff; }
@@ -9771,11 +9815,18 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
 <div class="wrap">
   <div class="status" id="status"><span class="muted">connecting\u2026</span></div>
 
-  <div class="bar">
-    <button id="launch-soh">\u25B6 Launch SoH</button>
-    <button id="launch-2s2h">\u25B6 Launch 2S2H</button>
-    <span id="launchMsg" class="muted"></span>
+  <div class="cap">Games</div>
+  <div class="game-row">
+    <button class="launch" data-game="soh">\u25B6 Launch SoH</button>
+    <input type="text" class="path" id="path-soh" placeholder="path to soh.exe" />
+    <button data-browse="soh">Browse\u2026</button>
   </div>
+  <div class="game-row">
+    <button class="launch" data-game="2s2h">\u25B6 Launch 2S2H</button>
+    <input type="text" class="path" id="path-2s2h" placeholder="path to 2ship.exe" />
+    <button data-browse="2s2h">Browse\u2026</button>
+  </div>
+  <div id="launchMsg" class="muted"></div>
 
   <div class="cap">Catalog</div>
   <div class="bar">
@@ -9809,15 +9860,48 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
 
     function req(msg) { return commander.request(msg); }
 
-    function launch(game, label) {
-      $("launchMsg").textContent = "launching " + label + "\u2026";
-      req({ type: "launch", game: game }).then(function (res) {
-        if (!res) { $("launchMsg").textContent = "no response"; return; }
-        $("launchMsg").textContent = res.ok ? (label + " launched") : (res.error || "launch failed");
+    function setMsg(t) { $("launchMsg").textContent = t; }
+
+    // Launch buttons.
+    Array.prototype.forEach.call(document.querySelectorAll(".launch"), function (b) {
+      b.addEventListener("click", function () {
+        var g = b.getAttribute("data-game");
+        setMsg("launching " + GAME[g] + "\u2026");
+        req({ type: "launch", game: g }).then(function (res) {
+          if (!res) { setMsg("no response"); return; }
+          setMsg(res.ok ? (GAME[g] + " launched") : (res.error || "launch failed"));
+        });
+      });
+    });
+
+    // Path fields: save on edit.
+    ["soh", "2s2h"].forEach(function (g) {
+      $("path-" + g).addEventListener("change", function () {
+        req({ type: "set-path", game: g, path: $("path-" + g).value });
+      });
+    });
+
+    // Browse buttons: open the native file dialog on the plugin side.
+    Array.prototype.forEach.call(document.querySelectorAll("[data-browse]"), function (b) {
+      b.addEventListener("click", function () {
+        var g = b.getAttribute("data-browse");
+        setMsg("opening file picker\u2026");
+        req({ type: "browse", game: g }).then(function (res) {
+          if (!res) { setMsg("no response"); return; }
+          if (res.cancelled) { setMsg("cancelled"); return; }
+          if (res.error) { setMsg(res.error); return; }
+          if (res.path) { $("path-" + g).value = res.path; setMsg("selected: " + res.path); }
+        });
+      });
+    });
+
+    function loadPaths() {
+      req({ type: "paths" }).then(function (res) {
+        if (!res) return;
+        $("path-soh").value = res.soh || "";
+        $("path-2s2h").value = res["2s2h"] || "";
       });
     }
-    $("launch-soh").addEventListener("click", function () { launch("soh", "SoH"); });
-    $("launch-2s2h").addEventListener("click", function () { launch("2s2h", "2S2H"); });
 
     function renderStatus(games) {
       var el = $("status");
@@ -9923,6 +10007,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
     });
 
     // Initial load.
+    loadPaths();
     req({ type: "status" }).then(function (res) { if (res) renderStatus(res.games); });
     req({ type: "recent" }).then(function (res) {
       if (res && res.hooks) res.hooks.forEach(logLine);
@@ -9935,6 +10020,15 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
 // mod.ts
 var LOOKUP_CACHE_KEY = "lookups_cache";
 var OVERRIDES_KEY = "catalog_overrides";
+var EXE_KEY = {
+  soh: "soh_exe",
+  "2s2h": "s2h_exe"
+};
+var GAME_TITLE = {
+  soh: "Ship of Harkinian",
+  "2s2h": "2 Ship 2 Harkinian"
+};
+var picker = makeFilePicker();
 var DEFAULT_SOH_PORT = 43384;
 var DEFAULT_S2H_PORT = 43385;
 var DEFAULT_CONFIRM_WINDOW_MS = 1500;
@@ -9982,20 +10076,6 @@ var plugin = definePlugin({
         type: "number",
         default: DEFAULT_CONFIRM_WINDOW_MS,
         description: "How long to wait for a spawn's OnActorInit before refunding."
-      },
-      {
-        key: "soh_exe",
-        label: "Ship of Harkinian executable",
-        type: "string",
-        default: "",
-        description: "Full path to soh.exe, for the Sail tab's Launch button. It runs with the game's own folder as the working directory."
-      },
-      {
-        key: "s2h_exe",
-        label: "2 Ship 2 Harkinian executable",
-        type: "string",
-        default: "",
-        description: "Full path to 2ship.exe, for the Sail tab's Launch button."
       },
       {
         key: "lookups_url",
@@ -10134,9 +10214,32 @@ async function handleTabRequest(ctx, catalog, raw) {
           ...recentHooks
         ]
       };
+    case "paths":
+      return {
+        soh: String(ctx.storage.get(EXE_KEY.soh) ?? ""),
+        "2s2h": String(ctx.storage.get(EXE_KEY["2s2h"]) ?? "")
+      };
+    case "set-path": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      ctx.storage.set(EXE_KEY[game], String(req.path ?? "").trim());
+      return {
+        ok: true
+      };
+    }
+    case "browse": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      const path = await picker.pick(`Select the ${GAME_TITLE[game]} executable`);
+      if (!path) return {
+        cancelled: true
+      };
+      ctx.storage.set(EXE_KEY[game], path);
+      return {
+        path
+      };
+    }
     case "launch": {
       const game = req.game === "2s2h" ? "2s2h" : "soh";
-      const exe = String(ctx.settings.get(game === "soh" ? "soh_exe" : "s2h_exe") || "");
+      const exe = String(ctx.storage.get(EXE_KEY[game]) ?? "");
       const result = launchGame(exe);
       if (result.ok) ctx.log.info(`launched ${game}: ${exe}`);
       else ctx.log.warn(`launch ${game} failed: ${result.error}`);

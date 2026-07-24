@@ -31,11 +31,21 @@ import { SailServer } from "./src/server.ts";
 import { buildSpawnFunction, SpawnConfirmer, Spawner } from "./src/spawn.ts";
 import { Catalog } from "./src/catalog.ts";
 import { registerCatalogCommands } from "./src/catalog_commands.ts";
-import { launchGame } from "./src/launcher.ts";
+import { launchGame, makeFilePicker } from "./src/launcher.ts";
 import { TAB_HTML } from "./src/tab.ts";
 
 const LOOKUP_CACHE_KEY = "lookups_cache";
 const OVERRIDES_KEY = "catalog_overrides";
+// Executable paths live in storage (managed from the tab's Browse button, since
+// a plugin can't write its own settings).
+const EXE_KEY: Record<SailGame, string> = { soh: "soh_exe", "2s2h": "s2h_exe" };
+const GAME_TITLE: Record<SailGame, string> = {
+  soh: "Ship of Harkinian",
+  "2s2h": "2 Ship 2 Harkinian",
+};
+
+// The native file dialog for Browse (Windows OpenFileDialog).
+const picker = makeFilePicker();
 
 const DEFAULT_SOH_PORT = 43384;
 const DEFAULT_S2H_PORT = 43385;
@@ -97,22 +107,6 @@ const plugin: Plugin = definePlugin({
         default: DEFAULT_CONFIRM_WINDOW_MS,
         description:
           "How long to wait for a spawn's OnActorInit before refunding.",
-      },
-      {
-        key: "soh_exe",
-        label: "Ship of Harkinian executable",
-        type: "string",
-        default: "",
-        description:
-          "Full path to soh.exe, for the Sail tab's Launch button. It runs with the game's own folder as the working directory.",
-      },
-      {
-        key: "s2h_exe",
-        label: "2 Ship 2 Harkinian executable",
-        type: "string",
-        default: "",
-        description:
-          "Full path to 2ship.exe, for the Sail tab's Launch button.",
       },
       {
         key: "lookups_url",
@@ -257,11 +251,28 @@ async function handleTabRequest(
       return { games: statusGames() };
     case "recent":
       return { hooks: [...recentHooks] };
+    case "paths":
+      return {
+        soh: String(ctx.storage.get(EXE_KEY.soh) ?? ""),
+        "2s2h": String(ctx.storage.get(EXE_KEY["2s2h"]) ?? ""),
+      };
+    case "set-path": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      ctx.storage.set(EXE_KEY[game], String(req.path ?? "").trim());
+      return { ok: true };
+    }
+    case "browse": {
+      const game = req.game === "2s2h" ? "2s2h" : "soh";
+      const path = await picker.pick(
+        `Select the ${GAME_TITLE[game]} executable`,
+      );
+      if (!path) return { cancelled: true };
+      ctx.storage.set(EXE_KEY[game], path);
+      return { path };
+    }
     case "launch": {
       const game = req.game === "2s2h" ? "2s2h" : "soh";
-      const exe = String(
-        ctx.settings.get(game === "soh" ? "soh_exe" : "s2h_exe") || "",
-      );
+      const exe = String(ctx.storage.get(EXE_KEY[game]) ?? "");
       const result = launchGame(exe);
       if (result.ok) ctx.log.info(`launched ${game}: ${exe}`);
       else ctx.log.warn(`launch ${game} failed: ${result.error}`);

@@ -14,6 +14,9 @@ export const TAB_HTML: string = String.raw`
   .pill.off { color: #9b95ab; }
   .pill.err { border-color: #a6553e; color: #e39b8a; }
   .bar { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap; }
+  .game-row { display: flex; gap: .5rem; align-items: center; margin-bottom: .4rem; }
+  .game-row .launch { white-space: nowrap; }
+  input.path { flex: 1; }
   button, input, select { font: inherit; }
   button { background: #17151d; border: 1px solid #322e3f; color: #e8e5f0; border-radius: 8px; padding: .35rem .7rem; cursor: pointer; }
   button:hover { border-color: #9b6bff; }
@@ -38,11 +41,18 @@ export const TAB_HTML: string = String.raw`
 <div class="wrap">
   <div class="status" id="status"><span class="muted">connecting…</span></div>
 
-  <div class="bar">
-    <button id="launch-soh">▶ Launch SoH</button>
-    <button id="launch-2s2h">▶ Launch 2S2H</button>
-    <span id="launchMsg" class="muted"></span>
+  <div class="cap">Games</div>
+  <div class="game-row">
+    <button class="launch" data-game="soh">▶ Launch SoH</button>
+    <input type="text" class="path" id="path-soh" placeholder="path to soh.exe" />
+    <button data-browse="soh">Browse…</button>
   </div>
+  <div class="game-row">
+    <button class="launch" data-game="2s2h">▶ Launch 2S2H</button>
+    <input type="text" class="path" id="path-2s2h" placeholder="path to 2ship.exe" />
+    <button data-browse="2s2h">Browse…</button>
+  </div>
+  <div id="launchMsg" class="muted"></div>
 
   <div class="cap">Catalog</div>
   <div class="bar">
@@ -76,15 +86,48 @@ export const TAB_HTML: string = String.raw`
 
     function req(msg) { return commander.request(msg); }
 
-    function launch(game, label) {
-      $("launchMsg").textContent = "launching " + label + "…";
-      req({ type: "launch", game: game }).then(function (res) {
-        if (!res) { $("launchMsg").textContent = "no response"; return; }
-        $("launchMsg").textContent = res.ok ? (label + " launched") : (res.error || "launch failed");
+    function setMsg(t) { $("launchMsg").textContent = t; }
+
+    // Launch buttons.
+    Array.prototype.forEach.call(document.querySelectorAll(".launch"), function (b) {
+      b.addEventListener("click", function () {
+        var g = b.getAttribute("data-game");
+        setMsg("launching " + GAME[g] + "…");
+        req({ type: "launch", game: g }).then(function (res) {
+          if (!res) { setMsg("no response"); return; }
+          setMsg(res.ok ? (GAME[g] + " launched") : (res.error || "launch failed"));
+        });
+      });
+    });
+
+    // Path fields: save on edit.
+    ["soh", "2s2h"].forEach(function (g) {
+      $("path-" + g).addEventListener("change", function () {
+        req({ type: "set-path", game: g, path: $("path-" + g).value });
+      });
+    });
+
+    // Browse buttons: open the native file dialog on the plugin side.
+    Array.prototype.forEach.call(document.querySelectorAll("[data-browse]"), function (b) {
+      b.addEventListener("click", function () {
+        var g = b.getAttribute("data-browse");
+        setMsg("opening file picker…");
+        req({ type: "browse", game: g }).then(function (res) {
+          if (!res) { setMsg("no response"); return; }
+          if (res.cancelled) { setMsg("cancelled"); return; }
+          if (res.error) { setMsg(res.error); return; }
+          if (res.path) { $("path-" + g).value = res.path; setMsg("selected: " + res.path); }
+        });
+      });
+    });
+
+    function loadPaths() {
+      req({ type: "paths" }).then(function (res) {
+        if (!res) return;
+        $("path-soh").value = res.soh || "";
+        $("path-2s2h").value = res["2s2h"] || "";
       });
     }
-    $("launch-soh").addEventListener("click", function () { launch("soh", "SoH"); });
-    $("launch-2s2h").addEventListener("click", function () { launch("2s2h", "2S2H"); });
 
     function renderStatus(games) {
       var el = $("status");
@@ -190,6 +233,7 @@ export const TAB_HTML: string = String.raw`
     });
 
     // Initial load.
+    loadPaths();
     req({ type: "status" }).then(function (res) { if (res) renderStatus(res.games); });
     req({ type: "recent" }).then(function (res) {
       if (res && res.hooks) res.hooks.forEach(logLine);
