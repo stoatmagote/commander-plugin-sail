@@ -158,6 +158,45 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
     },
 
     {
+      id: "notify",
+      name: "Show a notification in-game",
+      description:
+        "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command.",
+      requires: { account: "none" },
+      params: [
+        targetParam(),
+        {
+          key: "message",
+          label: "Message",
+          type: "string",
+          required: true,
+          description:
+            "Templated, so {user} and {arg.name} work: `{user} spawned a {arg.actor.label}!`",
+        },
+      ],
+      run: async (ctx) => {
+        // One line only: a newline would end the console command early.
+        const message = (ctx.params.message ?? "").replace(/\s+/g, " ").trim();
+        if (!message) return fail("no message was given");
+
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+
+        const results = await Promise.all(
+          games.map(async (game) => ({
+            game,
+            status: await dispatch.send(game, {
+              type: "command",
+              command: `notify ${message}`,
+            }),
+          })),
+        );
+        return summarize(results);
+      },
+    },
+
+    {
       id: "multi",
       name: "Per-game command",
       description:

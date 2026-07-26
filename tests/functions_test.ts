@@ -46,6 +46,7 @@ function ctxOf(params: Record<string, string>): FunctionContext {
       messageId: "m1",
     },
     prior: {},
+    vars: {},
     signal: new AbortController().signal,
   };
 }
@@ -346,4 +347,40 @@ Deno.test("an unknown target falls back to any-connected", async () => {
   );
   assert(res.ok);
   assertEquals(sent[0].game, "2s2h");
+});
+
+// ---- sail.notify (COM-62) ----
+
+Deno.test("notify sends the game's notify console command", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh", "2s2h"]);
+  const notify = fns(dispatch).get("notify")!;
+
+  const ok = await notify.run(
+    ctxOf({ target: "both", message: "Viewer1 spawned a cucco!" }),
+  );
+  assert(ok.ok);
+  assertEquals(sent.length, 2);
+  assertEquals(sent[0].body, {
+    type: "command",
+    command: "notify Viewer1 spawned a cucco!",
+  });
+});
+
+Deno.test("notify collapses newlines and refuses an empty message", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh"]);
+  const notify = fns(dispatch).get("notify")!;
+
+  // A newline would terminate the console command early, truncating the rest.
+  await notify.run(ctxOf({ target: "soh", message: "line one\nline two" }));
+  assertEquals(sent[0].body, {
+    type: "command",
+    command: "notify line one line two",
+  });
+
+  const empty = await notify.run(ctxOf({ target: "soh", message: "   " }));
+  assert(!empty.ok);
+
+  const offline = fns(fakeDispatch([]).dispatch).get("notify")!;
+  const nogame = await offline.run(ctxOf({ target: "soh", message: "hi" }));
+  assert(!nogame.ok, "with nothing connected the step fails, so it refunds");
 });

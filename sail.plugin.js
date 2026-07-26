@@ -171,6 +171,39 @@ function buildSailFunctions(deps) {
       }
     },
     {
+      id: "notify",
+      name: "Show a notification in-game",
+      description: "Pop a message up on screen \u2014 e.g. announcing who redeemed something. Sends the game's `notify` console command.",
+      requires: {
+        account: "none"
+      },
+      params: [
+        targetParam(),
+        {
+          key: "message",
+          label: "Message",
+          type: "string",
+          required: true,
+          description: "Templated, so {user} and {arg.name} work: `{user} spawned a {arg.actor.label}!`"
+        }
+      ],
+      run: async (ctx) => {
+        const message = (ctx.params.message ?? "").replace(/\s+/g, " ").trim();
+        if (!message) return fail("no message was given");
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+        const results = await Promise.all(games.map(async (game) => ({
+          game,
+          status: await dispatch.send(game, {
+            type: "command",
+            command: `notify ${message}`
+          })
+        })));
+        return summarize(results);
+      }
+    },
+    {
       id: "multi",
       name: "Per-game command",
       description: "Run one or more console commands on each game, with optional per-game overrides. Separate multiple commands with a semicolon (;). Sends only to connected games and succeeds if at least one accepts \u2014 so one command works whether SoH, 2S2H, or both are running. Use this whenever the commands differ between the games (e.g. mirror world, which needs two CVars per game).",
@@ -9665,17 +9698,38 @@ var Catalog = class {
 };
 
 // src/launcher.ts
+function psPath(p) {
+  return p.replace(/\//g, "\\").replace(/'/g, "''");
+}
+function detachedCommand(path, cwd, os = Deno.build.os) {
+  if (os !== "windows") return {
+    cmd: path,
+    args: []
+  };
+  return {
+    cmd: "powershell",
+    args: [
+      "-NoProfile",
+      "-Command",
+      `Start-Process -FilePath '${psPath(path)}' -WorkingDirectory '${psPath(cwd)}'`
+    ]
+  };
+}
 var realLaunchHost = {
   stat: (path) => {
     Deno.statSync(path);
   },
   spawn: (path, cwd) => {
-    new Deno.Command(path, {
-      cwd,
+    const { cmd, args } = detachedCommand(path, cwd);
+    const child = new Deno.Command(cmd, {
+      // Only meaningful off Windows, where we exec the game itself.
+      cwd: cmd === path ? cwd : void 0,
+      args,
       stdout: "null",
       stderr: "null",
       stdin: "null"
     }).spawn();
+    child.unref();
   }
 };
 var realRunner = {
@@ -10167,11 +10221,24 @@ var plugin = definePlugin({
       ],
       steps: [
         {
+          // safespawn keeps the actor out of geometry; the trailing 0 is the
+          // spawn parameter the games expect.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
-            verb: "spawn"
+            verb: "safespawn",
+            params: "0"
+          }
+        },
+        {
+          // Only reached when the spawn was confirmed — a failed step stops
+          // the run — so the notification can never claim something that
+          // didn't happen.
+          functionId: "sail.notify",
+          params: {
+            target: "any",
+            message: "{user} spawned a {arg.actor.label}!"
           }
         }
       ]

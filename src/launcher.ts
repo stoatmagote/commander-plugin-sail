@@ -5,6 +5,18 @@
 // must be its own directory, because SoH/2S2H load their asset archives (*.o2r)
 // relative to cwd. The spawn side is injected so this unit-tests without
 // actually starting anything.
+//
+// The game must be launched *detached* rather than as our child. Spawning it
+// directly makes it share Commander's console, and that has two nasty
+// consequences: closing that console (or the terminal Commander was started
+// from) sends the game a close event too, and the game's console-reading thread
+// sees an immediately-EOF stdin, which it can spin on — felt in-game as input
+// lag. Windows has no "detach" flag exposed through Deno, so we go through
+// PowerShell's Start-Process, which uses ShellExecute: the game gets its own
+// console, inherits none of our handles, and isn't our child at all.
+//
+// None of this affects Sail itself — the games dial *in* over TCP, so the
+// two-way link never depended on the process relationship.
 
 /** The bits of the OS the launcher needs — real impl below, faked in tests. */
 export interface LaunchHost {
@@ -14,17 +26,49 @@ export interface LaunchHost {
   spawn(path: string, cwd: string): void;
 }
 
+/** PowerShell wants backslashes, and doubles single quotes to escape them. */
+function psPath(p: string): string {
+  return p.replace(/\//g, "\\").replace(/'/g, "''");
+}
+
+/**
+ * The command that starts `path` detached from this process. Exposed (and
+ * pure) so the quoting is unit-tested without launching anything.
+ */
+export function detachedCommand(
+  path: string,
+  cwd: string,
+  os: string = Deno.build.os,
+): { cmd: string; args: string[] } {
+  if (os !== "windows") return { cmd: path, args: [] };
+  return {
+    cmd: "powershell",
+    args: [
+      "-NoProfile",
+      "-Command",
+      `Start-Process -FilePath '${psPath(path)}' ` +
+      `-WorkingDirectory '${psPath(cwd)}'`,
+    ],
+  };
+}
+
 export const realLaunchHost: LaunchHost = {
   stat: (path) => {
     Deno.statSync(path);
   },
   spawn: (path, cwd) => {
-    new Deno.Command(path, {
-      cwd,
+    const { cmd, args } = detachedCommand(path, cwd);
+    const child = new Deno.Command(cmd, {
+      // Only meaningful off Windows, where we exec the game itself.
+      cwd: cmd === path ? cwd : undefined,
+      args,
       stdout: "null",
       stderr: "null",
       stdin: "null",
     }).spawn();
+    // Without this the child keeps Commander's event loop alive, so Commander
+    // can't shut down cleanly while a game is running.
+    child.unref();
   },
 };
 

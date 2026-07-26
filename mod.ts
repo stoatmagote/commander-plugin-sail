@@ -217,10 +217,29 @@ const plugin: Plugin = definePlugin({
       trigger: "spawn",
       description: "Spawn something in the game, e.g. !spawn cucco",
       params: [{ name: "actor", type: "choice", optionSource: "sail.actors" }],
-      steps: [{
-        functionId: "sail.spawn",
-        params: { target: "any", actorId: "{arg.actor}", verb: "spawn" },
-      }],
+      steps: [
+        {
+          // safespawn keeps the actor out of geometry; the trailing 0 is the
+          // spawn parameter the games expect.
+          functionId: "sail.spawn",
+          params: {
+            target: "any",
+            actorId: "{arg.actor}",
+            verb: "safespawn",
+            params: "0",
+          },
+        },
+        {
+          // Only reached when the spawn was confirmed — a failed step stops
+          // the run — so the notification can never claim something that
+          // didn't happen.
+          functionId: "sail.notify",
+          params: {
+            target: "any",
+            message: "{user} spawned a {arg.actor.label}!",
+          },
+        },
+      ],
     });
     ctx.commands.registerDefault({
       key: "give",

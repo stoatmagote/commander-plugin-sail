@@ -4,6 +4,7 @@ import { assert, assertEquals } from "@std/assert";
 import {
   buildPickerScript,
   type CommandRunner,
+  detachedCommand,
   dirOf,
   launchGame,
   type LaunchHost,
@@ -109,4 +110,43 @@ Deno.test("picker is a no-op off Windows, and swallows a runner failure", async 
 
   const broken = fakeRunner("", true);
   assertEquals(await makeFilePicker(broken.runner, "windows").pick("t"), null);
+});
+
+// ---- detached launch (COM-63) ----
+
+Deno.test("on Windows the game is started detached, not as our child", () => {
+  const { cmd, args } = detachedCommand(
+    "C:/Games/2 Ship 2 Harkinian/2s2h.exe",
+    "C:/Games/2 Ship 2 Harkinian",
+    "windows",
+  );
+  // ShellExecute via Start-Process: the game gets its own console, so closing
+  // Commander (or the terminal it was started from) can't take it down, and it
+  // never sees our already-at-EOF stdin.
+  assertEquals(cmd, "powershell");
+  const script = args[args.length - 1];
+  assert(script.startsWith("Start-Process -FilePath "), script);
+  // Backslashes: `start`/ShellExecute mis-parse forward slashes.
+  assert(
+    script.includes(String.raw`'C:\Games\2 Ship 2 Harkinian\2s2h.exe'`),
+    script,
+  );
+  assert(
+    script.includes(
+      String.raw`-WorkingDirectory 'C:\Games\2 Ship 2 Harkinian'`,
+    ),
+    script,
+  );
+});
+
+Deno.test("a quote in the path can't break out of the PowerShell string", () => {
+  const { args } = detachedCommand("C:/it's/game.exe", "C:/it's", "windows");
+  const script = args[args.length - 1];
+  assert(script.includes(String.raw`'C:\it''s\game.exe'`), script);
+});
+
+Deno.test("elsewhere the executable is run directly", () => {
+  const { cmd, args } = detachedCommand("/opt/soh/soh", "/opt/soh", "linux");
+  assertEquals(cmd, "/opt/soh/soh");
+  assertEquals(args, []);
 });

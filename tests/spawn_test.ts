@@ -53,6 +53,7 @@ function ctxOf(params: Record<string, string>): FunctionContext {
       messageId: "m1",
     },
     prior: {},
+    vars: {},
     signal: new AbortController().signal,
   };
 }
