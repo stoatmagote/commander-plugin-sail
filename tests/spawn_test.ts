@@ -16,6 +16,7 @@ import {
   SpawnConfirmer,
   Spawner,
 } from "../src/spawn.ts";
+import { Catalog } from "../src/catalog.ts";
 
 const actorInit = (actorId: number) => ({ type: "OnActorInit", actorId });
 
@@ -59,15 +60,25 @@ function ctxOf(params: Record<string, string>): FunctionContext {
 function spawnFn(
   dispatch: SailDispatch,
   confirmer: SpawnConfirmer,
-  opts: { confirm?: boolean; window?: number } = {},
+  opts: { confirm?: boolean; window?: number; catalog?: Catalog } = {},
 ) {
   return buildSpawnFunction({
     dispatch,
     spawner: new Spawner(dispatch, confirmer),
+    catalog: opts.catalog,
     confirmEnabled: () => opts.confirm ?? true,
     windowMs: () => opts.window ?? 1000,
   });
 }
+
+/** A two-game actor whose id differs per game — the interesting case. */
+const CATALOG = new Catalog({
+  actors: [
+    { key: "ACTOR_EN_NIW", name: "cucco", kind: "actor", soh: 25, s2h: 17 },
+    { key: "ACTOR_SOH_ONLY", name: "soh only", kind: "actor", soh: 7 },
+  ],
+  items: [],
+});
 
 // ---- pure parsing ----
 
@@ -270,4 +281,53 @@ Deno.test("2S2H spawn subscribes to OnActorInit (filtered) and unsubscribes", as
     "unsubscribe:OnActorInit",
     "cleaned up",
   );
+});
+
+// ---- catalog keys (COM-59) ----
+
+Deno.test("a catalog key spawns the right id in each game", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh", "2s2h"]);
+  const confirmer = new SpawnConfirmer();
+  const fn = spawnFn(dispatch, confirmer, { confirm: false, catalog: CATALOG });
+
+  const result = await fn.run(
+    ctxOf({ target: "both", actorId: "ACTOR_EN_NIW" }),
+  );
+  assert(result.ok);
+  assertEquals(result.out?.name, "cucco");
+  // The same actor, numbered differently: 25 in SoH, 17 in 2S2H.
+  const commands = sent.map((s) =>
+    (s.body as { command?: string }).command ?? ""
+  );
+  assert(commands.some((c) => c.includes("25")), `SoH got: ${commands}`);
+  assert(commands.some((c) => c.includes("17")), `2S2H got: ${commands}`);
+});
+
+Deno.test("an actor missing from a connected game is skipped, not failed", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh", "2s2h"]);
+  const fn = spawnFn(dispatch, new SpawnConfirmer(), {
+    confirm: false,
+    catalog: CATALOG,
+  });
+
+  // "soh only" exists in one game; targeting both should still work there.
+  const result = await fn.run(
+    ctxOf({ target: "both", actorId: "ACTOR_SOH_ONLY" }),
+  );
+  assert(result.ok);
+  assertEquals(result.out?.games, "soh");
+  assertEquals(sent.length, 1);
+});
+
+Deno.test("a raw id still works, and an unknown name still fails", async () => {
+  const { dispatch } = fakeDispatch(["soh"]);
+  const fn = spawnFn(dispatch, new SpawnConfirmer(), {
+    confirm: false,
+    catalog: CATALOG,
+  });
+
+  assert((await fn.run(ctxOf({ target: "soh", actorId: "0x18" }))).ok);
+  const bad = await fn.run(ctxOf({ target: "soh", actorId: "nonsense" }));
+  assert(!bad.ok);
+  assert(!bad.ok && bad.error.includes("not an actor id"));
 });

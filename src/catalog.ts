@@ -5,7 +5,13 @@
 // catalog (src/catalog.data.ts, generated from the game sources) is the
 // baseline; per-entry overrides (enable/disable, price) come from ctx.storage
 // and are layered on top.
+//
+// Since COM-59 the catalog is published to Commander as two option lists, and
+// the commands themselves are ordinary (default) commands — so the matching,
+// pricing, charging and refunding all happen in the engine and this file is
+// just the data behind them.
 
+import type { ChoiceOption } from "@twitch-commander/plugin";
 import type { SailGame } from "./protocol.ts";
 import { fuzzyResolve, type MatchResult } from "./fuzzy.ts";
 import { BUNDLED_CATALOG } from "./catalog.data.ts";
@@ -115,6 +121,24 @@ export class Catalog {
     return fuzzyResolve(query, this.#actors, (e) => e.name);
   }
 
+  /** Exact lookup by catalog key — how a resolved command argument arrives. */
+  actorByKey(key: string): ActorEntry | undefined {
+    const k = (key ?? "").trim().toUpperCase();
+    return this.#actors.find((e) => e.key.toUpperCase() === k);
+  }
+
+  /**
+   * The enabled actors as options for a command argument (COM-57). The value is
+   * the catalog key rather than an id, because the same actor is numbered
+   * differently in each game — sail.spawn resolves it per game. Each carries
+   * its price, so `!spawn ganon` costs what the grid says it costs.
+   */
+  actorOptions(): ChoiceOption[] {
+    return this.#actors
+      .filter((e) => this.actorEnabled(e))
+      .map((e) => ({ value: e.key, label: e.name, cost: this.actorPrice(e) }));
+  }
+
   actorEnabled(e: ActorEntry): boolean {
     return this.#ov("actor", e.key).enabled ?? true;
   }
@@ -135,6 +159,13 @@ export class Catalog {
 
   resolveItem(query: string): MatchResult<ItemEntry> {
     return fuzzyResolve(query, this.#items, (e) => e.name);
+  }
+
+  /** Enabled items as options. The value is the name the game's `give` takes. */
+  itemOptions(): ChoiceOption[] {
+    return this.#items
+      .filter((e) => this.itemEnabled(e))
+      .map((e) => ({ value: e.name, cost: this.itemPrice(e) }));
   }
 
   itemEnabled(e: ItemEntry): boolean {

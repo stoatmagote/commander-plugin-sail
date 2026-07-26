@@ -133,3 +133,48 @@ Deno.test("rows() filters by name and reports enable/price/games", () => {
   const items = c.rows("item", "");
   assertEquals(items.length, 2);
 });
+
+// ---- option lists (COM-59) ----
+
+Deno.test("the catalog publishes enabled entries as priced options", () => {
+  const c = new Catalog(DATA);
+  const actors = c.actorOptions();
+
+  // The value is the catalog key, not an id: the same actor is numbered
+  // differently per game, so sail.spawn resolves it when it runs.
+  assertEquals(actors.map((o) => o.value), [
+    "ACTOR_EN_NIW",
+    "ACTOR_BOSS_DODONGO",
+    "ACTOR_EN_TEST",
+  ]);
+  assertEquals(actors[0].label, "cucco");
+  assertEquals(actors[0].cost, 50, "an ordinary actor's default price");
+  assertEquals(actors[1].cost, 300, "a boss costs more");
+  assertEquals(actors[2].cost, 100, "an enemy costs more than an actor");
+
+  // Items are given by name, so that's what the steps receive.
+  assertEquals(c.itemOptions().map((o) => o.value), ["bottle", "mask keaton"]);
+  assertEquals(c.itemOptions()[0].cost, 50);
+});
+
+Deno.test("the grid's overrides drive the options", () => {
+  const c = new Catalog(DATA);
+  c.setOverride("actor", "ACTOR_BOSS_DODONGO", { price: 1234 });
+  c.setOverride("actor", "ACTOR_EN_TEST", { enabled: false });
+  c.setOverride("item", "ITEM_BOTTLE", { enabled: false });
+
+  const actors = c.actorOptions();
+  assertEquals(actors.length, 2, "a disabled entry isn't offered at all");
+  assertEquals(
+    actors.find((o) => o.value === "ACTOR_BOSS_DODONGO")?.cost,
+    1234,
+  );
+  assertEquals(c.itemOptions().map((o) => o.value), ["mask keaton"]);
+});
+
+Deno.test("an actor can be found by the key an option hands over", () => {
+  const c = new Catalog(DATA);
+  assertEquals(c.actorByKey("ACTOR_EN_NIW")?.name, "cucco");
+  assertEquals(c.actorByKey("actor_en_niw")?.name, "cucco", "case-insensitive");
+  assertEquals(c.actorByKey("nope"), undefined);
+});

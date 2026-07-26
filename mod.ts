@@ -8,7 +8,7 @@
 //   - src/functions.ts        command-engine functions (command / effect / …)
 //   - src/spawn.ts            spawn with OnActorInit confirmation
 //   - src/lookups.ts          id → name resolution (bundled tables)
-//   - src/catalog.ts          the spawn/give catalog + !spawn / !give commands
+//   - src/catalog.ts          the spawn/give catalog (published as option lists)
 //   - src/launcher.ts         "run SoH / 2S2H" buttons
 //   - src/tab.ts              the Sail tab (status, catalog grid, hook log)
 //
@@ -17,12 +17,7 @@
 // settings). Listeners start in setup and close in teardown, so disabling the
 // plugin frees the ports and re-enabling works without restarting Commander.
 
-import {
-  type Ctx,
-  definePlugin,
-  type Invocation,
-  type Plugin,
-} from "@twitch-commander/plugin";
+import { type Ctx, definePlugin, type Plugin } from "@twitch-commander/plugin";
 import { ServerDispatch } from "./src/dispatch.ts";
 import { buildSailFunctions } from "./src/functions.ts";
 import { annotateHook, LookupStore } from "./src/lookups.ts";
@@ -30,7 +25,6 @@ import type { SailGame, SailHook } from "./src/protocol.ts";
 import { SailServer } from "./src/server.ts";
 import { buildSpawnFunction, SpawnConfirmer, Spawner } from "./src/spawn.ts";
 import { Catalog } from "./src/catalog.ts";
-import { registerCatalogCommands } from "./src/catalog_commands.ts";
 import { launchGame, makeFilePicker } from "./src/launcher.ts";
 import { TAB_HTML } from "./src/tab.ts";
 
@@ -182,19 +176,77 @@ const plugin: Plugin = definePlugin({
       ctx.functions.register(spec);
     }
     ctx.functions.register(
-      buildSpawnFunction({ dispatch, spawner, confirmEnabled, windowMs }),
+      buildSpawnFunction({
+        dispatch,
+        spawner,
+        catalog,
+        confirmEnabled,
+        windowMs,
+      }),
     );
 
-    // The named catalog commands.
-    registerCatalogCommands(ctx, {
-      catalog,
-      dispatch,
-      spawner,
-      points: ctx.points,
-      chat: ctx.chat,
-      confirmEnabled,
-      windowMs,
-      log: ctx.log,
+    // A status line as a function, so !sail is an editable command rather
+    // than something hardcoded here.
+    ctx.functions.register({
+      id: "status",
+      name: "Sail status",
+      description: "Report which games are connected, as {out.text}.",
+      requires: { account: "none" },
+      params: [],
+      run: () => Promise.resolve({ ok: true, out: { text: statusLine() } }),
+    });
+
+    // The catalog, published so command arguments can resolve against it: the
+    // engine does the matching, the "did you mean", and the pricing (each
+    // option carries the grid's price).
+    ctx.options.register({
+      id: "actors",
+      label: "Sail actors",
+      list: () => catalog.actorOptions(),
+    });
+    ctx.options.register({
+      id: "items",
+      label: "Sail items",
+      list: () => catalog.itemOptions(),
+    });
+
+    // The commands themselves — seeded once, then the streamer's to rename,
+    // re-price, cool down or extend.
+    ctx.commands.registerDefault({
+      key: "spawn",
+      trigger: "spawn",
+      description: "Spawn something in the game, e.g. !spawn cucco",
+      params: [{ name: "actor", type: "choice", optionSource: "sail.actors" }],
+      steps: [{
+        functionId: "sail.spawn",
+        params: { target: "any", actorId: "{arg.actor}", verb: "spawn" },
+      }],
+    });
+    ctx.commands.registerDefault({
+      key: "give",
+      trigger: "give",
+      description: "Give Link an item, e.g. !give bombs",
+      params: [{ name: "item", type: "choice", optionSource: "sail.items" }],
+      steps: [{
+        functionId: "sail.command",
+        params: { target: "any", command: "give {arg.item}" },
+      }],
+    });
+    ctx.commands.registerDefault({
+      key: "status",
+      trigger: "sail",
+      description: "Report which games are connected.",
+      usableBy: "streamer",
+      steps: [
+        { functionId: "sail.status", params: {} },
+        {
+          functionId: "core.say",
+          params: {
+            message: "{step1.out.text}",
+            reply_to_invoker: "true",
+          },
+        },
+      ],
     });
 
     // The Sail tab.
@@ -208,12 +260,6 @@ const plugin: Plugin = definePlugin({
         startAll();
         pushStatus();
       }
-    });
-
-    ctx.commands.register({
-      trigger: "sail",
-      usableBy: "streamer",
-      run: (inv) => reportStatus(ctx, inv),
     });
   },
 
@@ -326,7 +372,7 @@ function renderHook(game: SailGame, hook: SailHook): string {
 }
 
 /** `!sail` — report which games are connected. */
-function reportStatus(ctx: Ctx, inv: Invocation): Promise<void> {
+function statusLine(): string {
   const label: Record<SailGame, string> = { soh: "SoH", "2s2h": "2S2H" };
   const parts = [...servers.values()].map((server) => {
     if (server.error) return `${label[server.game]}: port error`;
@@ -335,8 +381,5 @@ function reportStatus(ctx: Ctx, inv: Invocation): Promise<void> {
       server.connected ? "connected" : `waiting on ${server.port}`
     }`;
   });
-  const text = parts.length > 0 ? parts.join(" | ") : "Sail isn't listening.";
-  return ctx.chat.send(text, { replyTo: inv.messageId }).then(() => {}).catch(
-    () => {},
-  );
+  return parts.length > 0 ? parts.join(" | ") : "Sail isn't listening.";
 }

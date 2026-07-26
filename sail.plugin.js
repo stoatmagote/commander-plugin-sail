@@ -2611,7 +2611,7 @@ function buildSpawnFunction(deps) {
       targetParam(),
       {
         key: "actorId",
-        label: "Actor id (decimal or 0x-hex)",
+        label: "Actor (id, 0x-hex, or catalog key)",
         type: "string",
         required: true
       },
@@ -2631,27 +2631,37 @@ function buildSpawnFunction(deps) {
       }
     ],
     run: async (ctx) => {
-      const actorId = parseActorId(ctx.params.actorId);
-      if (actorId === null) {
-        return fail2(`"${ctx.params.actorId}" is not an actor id`);
-      }
+      const raw = (ctx.params.actorId ?? "").trim();
       const target = readTarget(ctx.params.target);
       const games = liveGames(target, isConnected);
       if (games.length === 0) return fail2(describeOffline(target));
+      const literal = parseActorId(raw);
+      const entry = literal === null ? deps.catalog?.actorByKey(raw) : void 0;
+      if (literal === null && !entry) {
+        return fail2(`"${raw}" is not an actor id`);
+      }
+      const targets = games.map((game) => ({
+        game,
+        actorId: literal ?? deps.catalog.actorId(entry, game)
+      })).filter((t) => t.actorId !== void 0);
+      if (targets.length === 0) {
+        return fail2(`${entry?.name ?? raw} isn't in the connected game`);
+      }
       const opts = {
         verb: ctx.params.verb ?? "spawn",
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),
         windowMs: deps.windowMs()
       };
-      const results = await Promise.all(games.map((game) => spawner.spawn(game, actorId, opts)));
+      const results = await Promise.all(targets.map((t) => spawner.spawn(t.game, t.actorId, opts)));
       if (!results.every(Boolean)) {
         return fail2(deps.confirmEnabled() ? `spawn not confirmed within ${deps.windowMs()}ms` : "the spawn wasn't accepted");
       }
       return ok2({
-        actorId,
-        games: games.join(","),
-        confirmed: games.length
+        actorId: targets[0].actorId,
+        name: entry?.name ?? raw,
+        games: targets.map((t) => t.game).join(","),
+        confirmed: targets.length
       });
     }
   };
@@ -9555,6 +9565,24 @@ var Catalog = class {
   resolveActor(query) {
     return fuzzyResolve(query, this.#actors, (e) => e.name);
   }
+  /** Exact lookup by catalog key — how a resolved command argument arrives. */
+  actorByKey(key) {
+    const k = (key ?? "").trim().toUpperCase();
+    return this.#actors.find((e) => e.key.toUpperCase() === k);
+  }
+  /**
+   * The enabled actors as options for a command argument (COM-57). The value is
+   * the catalog key rather than an id, because the same actor is numbered
+   * differently in each game — sail.spawn resolves it per game. Each carries
+   * its price, so `!spawn ganon` costs what the grid says it costs.
+   */
+  actorOptions() {
+    return this.#actors.filter((e) => this.actorEnabled(e)).map((e) => ({
+      value: e.key,
+      label: e.name,
+      cost: this.actorPrice(e)
+    }));
+  }
   actorEnabled(e) {
     return this.#ov("actor", e.key).enabled ?? true;
   }
@@ -9573,6 +9601,13 @@ var Catalog = class {
   // ---- items ----
   resolveItem(query) {
     return fuzzyResolve(query, this.#items, (e) => e.name);
+  }
+  /** Enabled items as options. The value is the name the game's `give` takes. */
+  itemOptions() {
+    return this.#items.filter((e) => this.itemEnabled(e)).map((e) => ({
+      value: e.name,
+      cost: this.itemPrice(e)
+    }));
   }
   itemEnabled(e) {
     return this.#ov("item", e.key).enabled ?? true;
@@ -9628,129 +9663,6 @@ var Catalog = class {
     return out;
   }
 };
-
-// src/catalog_commands.ts
-function registerCatalogCommands(ctx, deps) {
-  return [
-    ctx.commands.register({
-      trigger: "spawn",
-      usableBy: "everyone",
-      run: (inv) => handleSpawn(deps, inv)
-    }),
-    ctx.commands.register({
-      trigger: "give",
-      usableBy: "everyone",
-      run: (inv) => handleGive(deps, inv)
-    })
-  ];
-}
-function reply(deps, inv, text) {
-  deps.chat.send(text, {
-    replyTo: inv.messageId
-  }).catch(() => {
-  });
-}
-function charge(deps, inv, price, reason, refId) {
-  if (!deps.points.enabled() || price <= 0) return {
-    ok: true,
-    txnId: null
-  };
-  const result = deps.points.tryCharge(inv.user.userId, price, {
-    reason,
-    refId
-  });
-  if (result.ok) return {
-    ok: true,
-    txnId: result.txn.id
-  };
-  reply(deps, inv, `that costs ${price} points \u2014 you have ${result.balance}.`);
-  return {
-    ok: false
-  };
-}
-function refund(deps, txnId) {
-  if (txnId !== null) {
-    try {
-      deps.points.refund(txnId, {
-        reason: "sail: nothing landed"
-      });
-    } catch {
-    }
-  }
-}
-async function handleSpawn(deps, inv) {
-  const query = inv.args.join(" ").trim();
-  if (!query) return reply(deps, inv, "usage: !spawn <name>");
-  const result = deps.catalog.resolveActor(query);
-  if (result.kind === "none") {
-    return reply(deps, inv, `no actor matches "${query}".`);
-  }
-  if (result.kind === "suggest") {
-    const names = result.entries.map((e) => e.name).join(", ");
-    return reply(deps, inv, `did you mean: ${names}?`);
-  }
-  const entry = result.entry;
-  if (!deps.catalog.actorEnabled(entry)) {
-    return reply(deps, inv, `"${entry.name}" isn't available.`);
-  }
-  const games = deps.catalog.actorGames(entry).filter((g) => deps.dispatch.connected(g));
-  if (games.length === 0) {
-    return reply(deps, inv, connectHint(deps.catalog.actorGames(entry)));
-  }
-  const price = deps.catalog.actorPrice(entry);
-  const charged = charge(deps, inv, price, `!spawn ${entry.name}`, entry.key);
-  if (!charged.ok) return;
-  const opts = {
-    confirm: deps.confirmEnabled(),
-    windowMs: deps.windowMs()
-  };
-  const landed = await Promise.all(games.map((game) => deps.spawner.spawn(game, deps.catalog.actorId(entry, game), opts)));
-  if (!landed.some(Boolean)) {
-    refund(deps, charged.txnId);
-    return reply(deps, inv, deps.confirmEnabled() ? `couldn't spawn ${entry.name} \u2014 it may be invalid here. Refunded.` : `couldn't reach the game to spawn ${entry.name}. Refunded.`);
-  }
-  const where = games.filter((_, i) => landed[i]).map((g) => GAME_LABEL[g]);
-  deps.log.info(`!spawn ${entry.name} \u2192 ${where.join(", ")}`);
-  reply(deps, inv, `spawned ${entry.name}!`);
-}
-async function handleGive(deps, inv) {
-  const query = inv.args.join(" ").trim();
-  if (!query) return reply(deps, inv, "usage: !give <item>");
-  const result = deps.catalog.resolveItem(query);
-  if (result.kind === "none") {
-    return reply(deps, inv, `no item matches "${query}".`);
-  }
-  if (result.kind === "suggest") {
-    const names = result.entries.map((e) => e.name).join(", ");
-    return reply(deps, inv, `did you mean: ${names}?`);
-  }
-  const entry = result.entry;
-  if (!deps.catalog.itemEnabled(entry)) {
-    return reply(deps, inv, `"${entry.name}" isn't available.`);
-  }
-  const games = deps.catalog.itemGames(entry).filter((g) => deps.dispatch.connected(g));
-  if (games.length === 0) {
-    return reply(deps, inv, connectHint(deps.catalog.itemGames(entry)));
-  }
-  const price = deps.catalog.itemPrice(entry);
-  const charged = charge(deps, inv, price, `!give ${entry.name}`, entry.key);
-  if (!charged.ok) return;
-  const command = `give ${entry.name}`;
-  const delivered = await Promise.all(games.map((game) => deps.dispatch.send(game, {
-    type: "command",
-    command
-  })));
-  if (!delivered.some((s) => s === "success")) {
-    refund(deps, charged.txnId);
-    return reply(deps, inv, `couldn't give ${entry.name}. Refunded.`);
-  }
-  deps.log.info(`!give ${entry.name}`);
-  reply(deps, inv, `gave ${entry.name}!`);
-}
-function connectHint(games) {
-  const names = games.map((g) => GAME_LABEL[g]).join(" or ");
-  return `${names || "the game"} isn't connected.`;
-}
 
 // src/launcher.ts
 var realLaunchHost = {
@@ -10213,18 +10125,96 @@ var plugin = definePlugin({
     ctx.functions.register(buildSpawnFunction({
       dispatch,
       spawner,
+      catalog,
       confirmEnabled,
       windowMs
     }));
-    registerCatalogCommands(ctx, {
-      catalog,
-      dispatch,
-      spawner,
-      points: ctx.points,
-      chat: ctx.chat,
-      confirmEnabled,
-      windowMs,
-      log: ctx.log
+    ctx.functions.register({
+      id: "status",
+      name: "Sail status",
+      description: "Report which games are connected, as {out.text}.",
+      requires: {
+        account: "none"
+      },
+      params: [],
+      run: () => Promise.resolve({
+        ok: true,
+        out: {
+          text: statusLine()
+        }
+      })
+    });
+    ctx.options.register({
+      id: "actors",
+      label: "Sail actors",
+      list: () => catalog.actorOptions()
+    });
+    ctx.options.register({
+      id: "items",
+      label: "Sail items",
+      list: () => catalog.itemOptions()
+    });
+    ctx.commands.registerDefault({
+      key: "spawn",
+      trigger: "spawn",
+      description: "Spawn something in the game, e.g. !spawn cucco",
+      params: [
+        {
+          name: "actor",
+          type: "choice",
+          optionSource: "sail.actors"
+        }
+      ],
+      steps: [
+        {
+          functionId: "sail.spawn",
+          params: {
+            target: "any",
+            actorId: "{arg.actor}",
+            verb: "spawn"
+          }
+        }
+      ]
+    });
+    ctx.commands.registerDefault({
+      key: "give",
+      trigger: "give",
+      description: "Give Link an item, e.g. !give bombs",
+      params: [
+        {
+          name: "item",
+          type: "choice",
+          optionSource: "sail.items"
+        }
+      ],
+      steps: [
+        {
+          functionId: "sail.command",
+          params: {
+            target: "any",
+            command: "give {arg.item}"
+          }
+        }
+      ]
+    });
+    ctx.commands.registerDefault({
+      key: "status",
+      trigger: "sail",
+      description: "Report which games are connected.",
+      usableBy: "streamer",
+      steps: [
+        {
+          functionId: "sail.status",
+          params: {}
+        },
+        {
+          functionId: "core.say",
+          params: {
+            message: "{step1.out.text}",
+            reply_to_invoker: "true"
+          }
+        }
+      ]
     });
     ctx.ui.registerTab({
       id: "sail",
@@ -10238,11 +10228,6 @@ var plugin = definePlugin({
         startAll();
         pushStatus();
       }
-    });
-    ctx.commands.register({
-      trigger: "sail",
-      usableBy: "streamer",
-      run: (inv) => reportStatus(ctx, inv)
     });
   },
   teardown() {
@@ -10365,7 +10350,7 @@ function renderHook(game, hook) {
   const fields = Object.entries(hook).filter(([key]) => key !== "type").map(([key, value]) => `${key}=${String(value)}`).join(" ");
   return fields ? `${hook.type} ${fields}` : hook.type;
 }
-function reportStatus(ctx, inv) {
+function statusLine() {
   const label = {
     soh: "SoH",
     "2s2h": "2S2H"
@@ -10377,12 +10362,7 @@ function reportStatus(ctx, inv) {
     if (!server.listening) return `${label[server.game]}: off`;
     return `${label[server.game]}: ${server.connected ? "connected" : `waiting on ${server.port}`}`;
   });
-  const text = parts.length > 0 ? parts.join(" | ") : "Sail isn't listening.";
-  return ctx.chat.send(text, {
-    replyTo: inv.messageId
-  }).then(() => {
-  }).catch(() => {
-  });
+  return parts.length > 0 ? parts.join(" | ") : "Sail isn't listening.";
 }
 export {
   mod_default as default

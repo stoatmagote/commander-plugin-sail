@@ -23,6 +23,7 @@ import {
   type SailTarget,
 } from "./dispatch.ts";
 import { readTarget, targetParam } from "./functions.ts";
+import type { Catalog } from "./catalog.ts";
 
 /** Verbs whose console command spawns an actor (legacy parseSpawnActorId). */
 export const SPAWN_VERBS: readonly string[] = [
@@ -227,6 +228,12 @@ export class Spawner {
 export interface SpawnFnDeps {
   dispatch: SailDispatch;
   spawner: Spawner;
+  /**
+   * The catalog, so an actor can be named rather than numbered. The same actor
+   * has a different id in each game, which is why resolution happens per game
+   * inside the function rather than in whatever passed the argument.
+   */
+  catalog?: Catalog;
   /** Whether to wait for OnActorInit (a plugin setting; read fresh). */
   confirmEnabled: () => boolean;
   /** How long to wait for confirmation, ms (a plugin setting; read fresh). */
@@ -239,7 +246,7 @@ const ok = (out: Record<string, unknown>): FunctionResult => ({
 });
 const fail = (error: string): FunctionResult => ({ ok: false, error });
 
-/** Build the sail.spawn function (raw actor id; the named catalog is !spawn). */
+/** Build the sail.spawn function (an actor id, or a name from the catalog). */
 export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
   const { dispatch, spawner } = deps;
   const isConnected = (game: SailGame) => dispatch.connected(game);
@@ -254,7 +261,7 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
       targetParam(),
       {
         key: "actorId",
-        label: "Actor id (decimal or 0x-hex)",
+        label: "Actor (id, 0x-hex, or catalog key)",
         type: "string",
         required: true,
       },
@@ -272,14 +279,33 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
       },
     ],
     run: async (ctx) => {
-      const actorId = parseActorId(ctx.params.actorId);
-      if (actorId === null) {
-        return fail(`"${ctx.params.actorId}" is not an actor id`);
-      }
-
+      const raw = (ctx.params.actorId ?? "").trim();
       const target: SailTarget = readTarget(ctx.params.target);
       const games = liveGames(target, isConnected);
       if (games.length === 0) return fail(describeOffline(target));
+
+      // A literal id is the same number everywhere; a catalog key — what the
+      // `sail.actors` option list hands over — has to be resolved per game,
+      // since the same actor is numbered differently in SoH and 2S2H.
+      const literal = parseActorId(raw);
+      const entry = literal === null
+        ? deps.catalog?.actorByKey(raw)
+        : undefined;
+      if (literal === null && !entry) {
+        return fail(`"${raw}" is not an actor id`);
+      }
+
+      const targets = games
+        .map((game) => ({
+          game,
+          actorId: literal ?? deps.catalog!.actorId(entry!, game),
+        }))
+        .filter((t): t is { game: SailGame; actorId: number } =>
+          t.actorId !== undefined
+        );
+      if (targets.length === 0) {
+        return fail(`${entry?.name ?? raw} isn't in the connected game`);
+      }
 
       const opts = {
         verb: ctx.params.verb ?? "spawn",
@@ -289,7 +315,7 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
       };
       // Every targeted game must confirm; otherwise the viewer is refunded.
       const results = await Promise.all(
-        games.map((game) => spawner.spawn(game, actorId, opts)),
+        targets.map((t) => spawner.spawn(t.game, t.actorId, opts)),
       );
       if (!results.every(Boolean)) {
         return fail(
@@ -298,7 +324,12 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
             : "the spawn wasn't accepted",
         );
       }
-      return ok({ actorId, games: games.join(","), confirmed: games.length });
+      return ok({
+        actorId: targets[0].actorId,
+        name: entry?.name ?? raw,
+        games: targets.map((t) => t.game).join(","),
+        confirmed: targets.length,
+      });
     },
   };
 }
