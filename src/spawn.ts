@@ -16,12 +16,7 @@
 
 import type { FunctionResult, FunctionSpec } from "@twitch-commander/plugin";
 import type { SailGame, SailHook } from "./protocol.ts";
-import {
-  describeOffline,
-  liveGames,
-  type SailDispatch,
-  type SailTarget,
-} from "./dispatch.ts";
+import { describeOffline, liveGames, type SailDispatch } from "./dispatch.ts";
 import { readTarget, targetParam } from "./functions.ts";
 import type { Catalog } from "./catalog.ts";
 
@@ -270,6 +265,19 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
         label: "Spawn command",
         type: "select",
         options: [...SPAWN_VERBS],
+        default: "safespawn",
+      },
+      {
+        // The games aren't symmetric: 2S2H has the custom `safespawn` (which
+        // preloads the actor's object and places it in front of the player),
+        // SoH only has vanilla `spawn`, which drops the actor on top of you and
+        // fails for objects the scene hasn't loaded. Sending safespawn to SoH
+        // is just an unknown command, so it gets its own verb until it's
+        // patched to match.
+        key: "soh_verb",
+        label: "Spawn command for SoH",
+        type: "select",
+        options: [...SPAWN_VERBS],
         default: "spawn",
       },
       {
@@ -280,7 +288,7 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
     ],
     run: async (ctx) => {
       const raw = (ctx.params.actorId ?? "").trim();
-      const target: SailTarget = readTarget(ctx.params.target);
+      const target = readTarget(ctx.params.target);
       const games = liveGames(target, isConnected);
       if (games.length === 0) return fail(describeOffline(target));
 
@@ -307,15 +315,20 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
         return fail(`${entry?.name ?? raw} isn't in the connected game`);
       }
 
+      const verbFor = (game: SailGame) =>
+        game === "soh"
+          ? (ctx.params.soh_verb || ctx.params.verb || "spawn")
+          : (ctx.params.verb || "spawn");
       const opts = {
-        verb: ctx.params.verb ?? "spawn",
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),
         windowMs: deps.windowMs(),
       };
       // Every targeted game must confirm; otherwise the viewer is refunded.
       const results = await Promise.all(
-        targets.map((t) => spawner.spawn(t.game, t.actorId, opts)),
+        targets.map((t) =>
+          spawner.spawn(t.game, t.actorId, { ...opts, verb: verbFor(t.game) })
+        ),
       );
       if (!results.every(Boolean)) {
         return fail(

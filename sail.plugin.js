@@ -25,6 +25,13 @@ function intendedGames(target) {
   if (target === "2s2h") return [
     "2s2h"
   ];
+  if (target.includes(",")) {
+    const named = target.split(",").map((g) => g.trim());
+    return [
+      "soh",
+      "2s2h"
+    ].filter((g) => named.includes(g));
+  }
   return [
     "soh",
     "2s2h"
@@ -36,7 +43,9 @@ function liveGames(target, isConnected) {
 }
 function describeOffline(target) {
   if (target === "both" || target === "any") return "no game is connected";
-  return `${GAME_LABEL[intendedGames(target)[0]]} isn't connected`;
+  const games = intendedGames(target);
+  if (games.length === 0) return "no game is connected";
+  return `${games.map((g) => GAME_LABEL[g]).join(" or ")} isn't connected`;
 }
 var ServerDispatch = class {
   #servers;
@@ -132,7 +141,16 @@ function targetParam() {
   };
 }
 function readTarget(raw) {
-  return SAIL_TARGETS.includes(raw ?? "") ? raw : "any";
+  const value = (raw ?? "").trim();
+  if (SAIL_TARGETS.includes(value)) return value;
+  const named = value.split(",").map((g) => g.trim()).filter(Boolean);
+  const games = named.filter((g) => g === "soh" || g === "2s2h");
+  if (games.length === 0 || games.length !== named.length) return "any";
+  const canonical = [
+    "soh",
+    "2s2h"
+  ];
+  return canonical.filter((g) => games.includes(g)).join(",");
 }
 function buildSailFunctions(deps) {
   const { dispatch } = deps;
@@ -178,7 +196,15 @@ function buildSailFunctions(deps) {
         account: "none"
       },
       params: [
-        targetParam(),
+        {
+          // Free text rather than a dropdown: this is normally driven by an
+          // earlier step (`{step1.out.games}`), and the editor's select would
+          // overwrite a templated value with whichever option it displayed.
+          key: "target",
+          label: "Game (soh | 2s2h | both | any, or a comma list)",
+          type: "string",
+          default: "any"
+        },
         {
           key: "message",
           label: "Message",
@@ -2655,6 +2681,21 @@ function buildSpawnFunction(deps) {
         options: [
           ...SPAWN_VERBS
         ],
+        default: "safespawn"
+      },
+      {
+        // The games aren't symmetric: 2S2H has the custom `safespawn` (which
+        // preloads the actor's object and places it in front of the player),
+        // SoH only has vanilla `spawn`, which drops the actor on top of you and
+        // fails for objects the scene hasn't loaded. Sending safespawn to SoH
+        // is just an unknown command, so it gets its own verb until it's
+        // patched to match.
+        key: "soh_verb",
+        label: "Spawn command for SoH",
+        type: "select",
+        options: [
+          ...SPAWN_VERBS
+        ],
         default: "spawn"
       },
       {
@@ -2680,13 +2721,16 @@ function buildSpawnFunction(deps) {
       if (targets.length === 0) {
         return fail2(`${entry?.name ?? raw} isn't in the connected game`);
       }
+      const verbFor = (game) => game === "soh" ? ctx.params.soh_verb || ctx.params.verb || "spawn" : ctx.params.verb || "spawn";
       const opts = {
-        verb: ctx.params.verb ?? "spawn",
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),
         windowMs: deps.windowMs()
       };
-      const results = await Promise.all(targets.map((t) => spawner.spawn(t.game, t.actorId, opts)));
+      const results = await Promise.all(targets.map((t) => spawner.spawn(t.game, t.actorId, {
+        ...opts,
+        verb: verbFor(t.game)
+      })));
       if (!results.every(Boolean)) {
         return fail2(deps.confirmEnabled() ? `spawn not confirmed within ${deps.windowMs()}ms` : "the spawn wasn't accepted");
       }
@@ -10237,7 +10281,9 @@ var plugin = definePlugin({
           // didn't happen.
           functionId: "sail.notify",
           params: {
-            target: "any",
+            // Exactly the games that confirmed the spawn — not "any"/"both",
+            // which would announce a SoH-only actor inside 2S2H too.
+            target: "{step1.out.games}",
             message: "{user} spawned a {arg.actor.label}!"
           }
         }

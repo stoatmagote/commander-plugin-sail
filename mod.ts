@@ -235,7 +235,9 @@ const plugin: Plugin = definePlugin({
           // didn't happen.
           functionId: "sail.notify",
           params: {
-            target: "any",
+            // Exactly the games that confirmed the spawn — not "any"/"both",
+            // which would announce a SoH-only actor inside 2S2H too.
+            target: "{step1.out.games}",
             message: "{user} spawned a {arg.actor.label}!",
           },
         },

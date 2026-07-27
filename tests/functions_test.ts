@@ -11,7 +11,11 @@ import {
   liveGames,
   type SailDispatch,
 } from "../src/dispatch.ts";
-import { buildSailFunctions, parseParameters } from "../src/functions.ts";
+import {
+  buildSailFunctions,
+  parseParameters,
+  readTarget,
+} from "../src/functions.ts";
 import type { OutgoingBody, ResultStatus, SailGame } from "../src/protocol.ts";
 
 function fakeDispatch(
@@ -383,4 +387,36 @@ Deno.test("notify collapses newlines and refuses an empty message", async () => 
   const offline = fns(fakeDispatch([]).dispatch).get("notify")!;
   const nogame = await offline.run(ctxOf({ target: "soh", message: "hi" }));
   assert(!nogame.ok, "with nothing connected the step fails, so it refunds");
+});
+
+// ---- targeting the games an earlier step acted on (COM-62 follow-up) ----
+
+Deno.test("an explicit game list targets only those games", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh", "2s2h"]);
+  const notify = fns(dispatch).get("notify")!;
+
+  // What {step1.out.games} resolves to when a SoH-only actor was spawned.
+  const one = await notify.run(ctxOf({ target: "soh", message: "hi" }));
+  assert(one.ok);
+  assertEquals(sent.map((s) => s.game), ["soh"]);
+
+  sent.length = 0;
+  await notify.run(ctxOf({ target: "soh,2s2h", message: "hi" }));
+  assertEquals(sent.map((s) => s.game), ["soh", "2s2h"]);
+
+  // A list naming a disconnected game reaches only what's actually there.
+  const partial = fakeDispatch(["2s2h"]);
+  await fns(partial.dispatch).get("notify")!.run(
+    ctxOf({ target: "soh,2s2h", message: "hi" }),
+  );
+  assertEquals(partial.sent.map((s) => s.game), ["2s2h"]);
+});
+
+Deno.test("a target that resolves to nothing usable falls back to any", () => {
+  // An unresolved template or a typo must not silently mean "every game".
+  assertEquals(readTarget("{step1.out.games}"), "any");
+  assertEquals(readTarget("soh,nonsense"), "any");
+  assertEquals(readTarget(""), "any");
+  assertEquals(readTarget("2s2h,soh"), "soh,2s2h");
+  assertEquals(readTarget("soh"), "soh");
 });

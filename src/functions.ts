@@ -19,6 +19,7 @@ import {
   SAIL_TARGETS,
   type SailDispatch,
   type SailTarget,
+  type TargetSpec,
 } from "./dispatch.ts";
 
 /** SoH's named effects (SoH Sail/sail-main/types.ts, EffectName). */
@@ -112,10 +113,17 @@ export function targetParam() {
   };
 }
 
-export function readTarget(raw: string | undefined): SailTarget {
-  return (SAIL_TARGETS as readonly string[]).includes(raw ?? "")
-    ? raw as SailTarget
-    : "any";
+export function readTarget(raw: string | undefined): TargetSpec {
+  const value = (raw ?? "").trim();
+  if ((SAIL_TARGETS as readonly string[]).includes(value)) return value;
+  // An explicit list of games, e.g. "{step1.out.games}" resolved to "soh,2s2h".
+  // Anything else (blank, a typo, an unresolved template) falls back to "any".
+  const named = value.split(",").map((g) => g.trim()).filter(Boolean);
+  const games: string[] = named.filter((g) => g === "soh" || g === "2s2h");
+  if (games.length === 0 || games.length !== named.length) return "any";
+  // Canonical order, so the value is predictable and matches dispatch order.
+  const canonical: string[] = ["soh", "2s2h"];
+  return canonical.filter((g) => games.includes(g)).join(",");
 }
 
 /** Build every Sail function spec. */
@@ -164,7 +172,15 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
         "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command.",
       requires: { account: "none" },
       params: [
-        targetParam(),
+        {
+          // Free text rather than a dropdown: this is normally driven by an
+          // earlier step (`{step1.out.games}`), and the editor's select would
+          // overwrite a templated value with whichever option it displayed.
+          key: "target",
+          label: "Game (soh | 2s2h | both | any, or a comma list)",
+          type: "string" as const,
+          default: "any",
+        },
         {
           key: "message",
           label: "Message",

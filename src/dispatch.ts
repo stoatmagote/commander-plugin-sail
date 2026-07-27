@@ -8,8 +8,15 @@
 import type { OutgoingBody, ResultStatus, SailGame } from "./protocol.ts";
 import type { SailServer } from "./server.ts";
 
-/** Who a step is aimed at. */
+/** The fixed choices the command editor offers for a target. */
 export type SailTarget = "soh" | "2s2h" | "both" | "any";
+
+/**
+ * What a target field may actually hold: one of the fixed choices above, or an
+ * explicit comma-separated list of games (`"soh,2s2h"`) — which is how a step
+ * aims at exactly the games an earlier step acted on.
+ */
+export type TargetSpec = string;
 
 export const SAIL_TARGETS: readonly SailTarget[] = [
   "soh",
@@ -31,9 +38,17 @@ export interface SailDispatch {
 }
 
 /** The games a target names, ignoring whether they're connected. */
-export function intendedGames(target: SailTarget): SailGame[] {
+export function intendedGames(target: TargetSpec): SailGame[] {
   if (target === "soh") return ["soh"];
   if (target === "2s2h") return ["2s2h"];
+  // An explicit list — "soh,2s2h" — is how one step aims at exactly the games
+  // an earlier step acted on (sail.spawn reports them as {step1.out.games}).
+  // Without this, announcing a spawn means re-resolving "any"/"both" from
+  // scratch, and a SoH-only actor gets announced in 2S2H as well.
+  if (target.includes(",")) {
+    const named = target.split(",").map((g) => g.trim());
+    return (["soh", "2s2h"] as SailGame[]).filter((g) => named.includes(g));
+  }
   return ["soh", "2s2h"];
 }
 
@@ -46,7 +61,7 @@ export function intendedGames(target: SailTarget): SailGame[] {
  * command engine refunds.
  */
 export function liveGames(
-  target: SailTarget,
+  target: TargetSpec,
   isConnected: (game: SailGame) => boolean,
 ): SailGame[] {
   const live = intendedGames(target).filter(isConnected);
@@ -54,9 +69,11 @@ export function liveGames(
 }
 
 /** A human explanation of why a target resolved to nothing. */
-export function describeOffline(target: SailTarget): string {
+export function describeOffline(target: TargetSpec): string {
   if (target === "both" || target === "any") return "no game is connected";
-  return `${GAME_LABEL[intendedGames(target)[0]]} isn't connected`;
+  const games = intendedGames(target);
+  if (games.length === 0) return "no game is connected";
+  return `${games.map((g) => GAME_LABEL[g]).join(" or ")} isn't connected`;
 }
 
 /** The real dispatch: sends through whichever client a game's server holds. */
