@@ -219,17 +219,16 @@ const plugin: Plugin = definePlugin({
       params: [{ name: "actor", type: "choice", optionSource: "sail.actors" }],
       steps: [
         {
-          // Each game gets the mechanism it actually has: 2S2H's custom
-          // safespawn console command, and on SoH the SpawnEnemyWithOffset
-          // effect (SoH has no safespawn, and its console `spawn` drops the
-          // actor on the player's head). The trailing 0 is the spawn
-          // parameter both games expect.
+          // safespawn puts the actor in front of the player rather than on
+          // their head, and loads its object first so actors the current scene
+          // never loaded still work. Both games have it (SoH 9.2.3 was patched
+          // to match 2S2H). The trailing 0 is the spawn parameter.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
-            soh_verb: "SpawnEnemyWithOffset",
+            soh_verb: "safespawn",
             params: "0",
           },
         },

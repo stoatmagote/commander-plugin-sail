@@ -241,16 +241,9 @@ Deno.test("AC: a confirmed spawn succeeds (charge stands)", async () => {
   const res = await run;
   assert(res.ok);
   if (res.ok) assertEquals(res.out?.actorId, 24);
-  // SoH spawns via the effect, which is what places the actor away from the
-  // player — its console `spawn` drops it on your head.
-  assertEquals(sent[0].body, {
-    type: "effect",
-    effect: {
-      type: "apply",
-      name: "SpawnEnemyWithOffset",
-      parameters: [24, 0],
-    },
-  });
+  // Both games use safespawn now — SoH 9.2.3 was patched to match 2S2H — so
+  // neither drops the actor on the player's head.
+  assertEquals(sent[0].body, { type: "command", command: "safespawn 24" });
 });
 
 Deno.test("AC: an unconfirmed spawn fails so the engine refunds", async () => {
@@ -333,17 +326,9 @@ Deno.test("a catalog key spawns the right id in each game", async () => {
   );
   assert(result.ok);
   assertEquals(result.out?.name, "cucco");
-  // The same actor, numbered differently: 25 in SoH, 17 in 2S2H — and each
-  // game gets the mechanism it actually supports (SoH an effect, 2S2H a
-  // console command), so check where the id landed for each.
-  const soh = sent.find((s) => s.game === "soh")?.body as {
-    effect?: { parameters?: number[] };
-  };
-  assertEquals(
-    soh?.effect?.parameters?.[0],
-    25,
-    `SoH got: ${JSON.stringify(soh)}`,
-  );
+  // The same actor, numbered differently: 25 in SoH, 17 in 2S2H.
+  const soh = sent.find((s) => s.game === "soh")?.body as { command?: string };
+  assertEquals(soh?.command, "safespawn 25", `SoH got: ${JSON.stringify(soh)}`);
 
   const s2h = sent.find((s) => s.game === "2s2h")?.body as { command?: string };
   assertEquals(

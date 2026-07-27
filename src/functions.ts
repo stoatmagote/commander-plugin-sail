@@ -184,9 +184,9 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
 
     {
       id: "notify",
-      name: "Show a notification in-game (2S2H only)",
+      name: "Show a notification in-game",
       description:
-        "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command. Only 2S2H has that command: SoH accepts it and shows nothing, so a step aimed at SoH quietly does nothing rather than failing (it must not refund a spawn that worked).",
+        "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command. Stock SoH has no such command; it needs the patched build (SoH 9.2.3 with `notify` added), and an unpatched one accepts the line and shows nothing rather than failing.",
       requires: { account: "none" },
       params: [
         {

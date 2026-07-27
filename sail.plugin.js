@@ -194,8 +194,8 @@ function buildSailFunctions(deps) {
     },
     {
       id: "notify",
-      name: "Show a notification in-game (2S2H only)",
-      description: "Pop a message up on screen \u2014 e.g. announcing who redeemed something. Sends the game's `notify` console command. Only 2S2H has that command: SoH accepts it and shows nothing, so a step aimed at SoH quietly does nothing rather than failing (it must not refund a spawn that worked).",
+      name: "Show a notification in-game",
+      description: "Pop a message up on screen \u2014 e.g. announcing who redeemed something. Sends the game's `notify` console command. Stock SoH has no such command; it needs the patched build (SoH 9.2.3 with `notify` added), and an unpatched one accepts the line and shows nothing rather than failing.",
       requires: {
         account: "none"
       },
@@ -2745,19 +2745,18 @@ function buildSpawnFunction(deps) {
         default: "safespawn"
       },
       {
-        // The games aren't symmetric. 2S2H has the custom `safespawn` console
-        // command (preloads the object, places the actor in front of you); SoH
-        // has no such command — its console `spawn` drops the actor on your
-        // head — but SoH *does* implement the Sail effects, and
-        // SpawnEnemyWithOffset places the actor properly. So each game gets the
-        // mechanism it actually supports.
+        // Both games now have the custom `safespawn` (SoH 9.2.3 was patched to
+        // match 2S2H), so the default is the same on each. SoH keeps its own
+        // field because it can also spawn through the Sail effects, which 2S2H
+        // stubs — SpawnEnemyWithOffset trades safespawn's object preloading for
+        // a floor raycast and upstream's per-actor safety checks.
         key: "soh_verb",
         label: "Spawn mechanism for SoH",
         type: "select",
         options: [
           ...SPAWN_MECHANISMS
         ],
-        default: "SpawnEnemyWithOffset"
+        default: "safespawn"
       },
       {
         key: "params",
@@ -2782,7 +2781,7 @@ function buildSpawnFunction(deps) {
       if (targets.length === 0) {
         return fail2(`${entry?.name ?? raw} isn't in the connected game`);
       }
-      const verbFor = (game) => game === "soh" ? ctx.params.soh_verb || "SpawnEnemyWithOffset" : ctx.params.verb || "safespawn";
+      const verbFor = (game) => game === "soh" ? ctx.params.soh_verb || "safespawn" : ctx.params.verb || "safespawn";
       const opts = {
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),
@@ -10326,17 +10325,16 @@ var plugin = definePlugin({
       ],
       steps: [
         {
-          // Each game gets the mechanism it actually has: 2S2H's custom
-          // safespawn console command, and on SoH the SpawnEnemyWithOffset
-          // effect (SoH has no safespawn, and its console `spawn` drops the
-          // actor on the player's head). The trailing 0 is the spawn
-          // parameter both games expect.
+          // safespawn puts the actor in front of the player rather than on
+          // their head, and loads its object first so actors the current scene
+          // never loaded still work. Both games have it (SoH 9.2.3 was patched
+          // to match 2S2H). The trailing 0 is the spawn parameter.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
-            soh_verb: "SpawnEnemyWithOffset",
+            soh_verb: "safespawn",
             params: "0"
           }
         },

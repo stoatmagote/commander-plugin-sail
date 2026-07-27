@@ -319,17 +319,16 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
         default: "safespawn",
       },
       {
-        // The games aren't symmetric. 2S2H has the custom `safespawn` console
-        // command (preloads the object, places the actor in front of you); SoH
-        // has no such command — its console `spawn` drops the actor on your
-        // head — but SoH *does* implement the Sail effects, and
-        // SpawnEnemyWithOffset places the actor properly. So each game gets the
-        // mechanism it actually supports.
+        // Both games now have the custom `safespawn` (SoH 9.2.3 was patched to
+        // match 2S2H), so the default is the same on each. SoH keeps its own
+        // field because it can also spawn through the Sail effects, which 2S2H
+        // stubs — SpawnEnemyWithOffset trades safespawn's object preloading for
+        // a floor raycast and upstream's per-actor safety checks.
         key: "soh_verb",
         label: "Spawn mechanism for SoH",
         type: "select",
         options: [...SPAWN_MECHANISMS],
-        default: "SpawnEnemyWithOffset",
+        default: "safespawn",
       },
       {
         key: "params",
@@ -368,11 +367,11 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
 
       // Defaults here rather than leaning on the ParamSpec `default`, which the
       // engine only uses to prefill the editor — a step saved before soh_verb
-      // existed has no value for it, and must not fall through to the 2S2H
-      // verb (sending `safespawn` to SoH is just an unknown command).
+      // existed has no value for it and would otherwise fall through to
+      // whatever the other game uses.
       const verbFor = (game: SailGame) =>
         game === "soh"
-          ? (ctx.params.soh_verb || "SpawnEnemyWithOffset")
+          ? (ctx.params.soh_verb || "safespawn")
           : (ctx.params.verb || "safespawn");
       const opts = {
         extra: ctx.params.params ?? "",
