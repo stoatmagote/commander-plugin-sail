@@ -24,6 +24,8 @@ export interface ActorEntry {
   kind: ActorKind;
   soh?: number; // actor id in SoH
   s2h?: number; // actor id in 2S2H
+  /** Baseline spawn distance for this actor; see actorDistance(). */
+  distance?: number;
 }
 
 export interface ItemEntry {
@@ -42,6 +44,8 @@ export interface CatalogData {
 export interface EntryOverride {
   enabled?: boolean;
   price?: number;
+  /** Actors only: how far in front of the player `safespawn` puts it. */
+  distance?: number;
 }
 /** key: `actor:<KEY>` or `item:<KEY>`. */
 export type Overrides = Record<string, EntryOverride>;
@@ -52,6 +56,12 @@ const DEFAULT_ACTOR_PRICE: Record<ActorKind, number> = {
   actor: 50,
 };
 const DEFAULT_ITEM_PRICE = 50;
+/**
+ * Matches `safespawn`'s own default in both games, so leaving every actor alone
+ * changes nothing — the point of the per-actor value is that a few need room
+ * (a big boss landing 120 units away is already on top of you).
+ */
+export const DEFAULT_ACTOR_DISTANCE = 120;
 
 /** A grid row for the Sail tab. */
 export interface CatalogRow {
@@ -63,6 +73,9 @@ export interface CatalogRow {
   price: number;
   defaultPrice: number;
   enabled: boolean;
+  /** Actors only — items aren't spawned, so they have no distance. */
+  distance?: number;
+  defaultDistance?: number;
 }
 
 export class Catalog {
@@ -104,6 +117,7 @@ export class Catalog {
     // Drop keys that match the default (or were cleared) so overrides stay minimal.
     if (merged.enabled === true) delete merged.enabled;
     if (merged.price === undefined) delete merged.price;
+    if (merged.distance === undefined) delete merged.distance;
     this.#overrides = { ...this.#overrides, [id]: merged };
     if (Object.keys(this.#overrides[id]).length === 0) {
       delete this.#overrides[id];
@@ -131,12 +145,23 @@ export class Catalog {
    * The enabled actors as options for a command argument (COM-57). The value is
    * the catalog key rather than an id, because the same actor is numbered
    * differently in each game — sail.spawn resolves it per game. Each carries
-   * its price, so `!spawn ganon` costs what the grid says it costs.
+   * its price, so `!spawn ganon` costs what the grid says it costs, and its
+   * spawn distance as `meta.distance` for the step to pass to safespawn.
+   *
+   * Every actor carries a distance rather than only the overridden ones:
+   * `{arg.actor.meta.distance}` fails the step when the chosen option doesn't
+   * have the key, which is the right behaviour for a typo but would otherwise
+   * break `!spawn` for every actor nobody had tuned yet.
    */
   actorOptions(): ChoiceOption[] {
     return this.#actors
       .filter((e) => this.actorEnabled(e))
-      .map((e) => ({ value: e.key, label: e.name, cost: this.actorPrice(e) }));
+      .map((e) => ({
+        value: e.key,
+        label: e.name,
+        cost: this.actorPrice(e),
+        meta: { distance: String(this.actorDistance(e)) },
+      }));
   }
 
   actorEnabled(e: ActorEntry): boolean {
@@ -144,6 +169,11 @@ export class Catalog {
   }
   actorPrice(e: ActorEntry): number {
     return this.#ov("actor", e.key).price ?? DEFAULT_ACTOR_PRICE[e.kind];
+  }
+  /** Streamer override, else the catalog's own value, else the game default. */
+  actorDistance(e: ActorEntry): number {
+    return this.#ov("actor", e.key).distance ?? e.distance ??
+      DEFAULT_ACTOR_DISTANCE;
   }
   actorGames(e: ActorEntry): SailGame[] {
     const games: SailGame[] = [];
@@ -201,6 +231,8 @@ export class Catalog {
           price: this.actorPrice(e),
           defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
           enabled: this.actorEnabled(e),
+          distance: this.actorDistance(e),
+          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
         });
         if (out.length >= limit) break;
       }

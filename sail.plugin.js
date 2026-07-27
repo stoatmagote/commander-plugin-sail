@@ -9656,6 +9656,7 @@ var DEFAULT_ACTOR_PRICE = {
   actor: 50
 };
 var DEFAULT_ITEM_PRICE = 50;
+var DEFAULT_ACTOR_DISTANCE = 120;
 var Catalog = class {
   #actors;
   #items;
@@ -9686,6 +9687,7 @@ var Catalog = class {
     };
     if (merged.enabled === true) delete merged.enabled;
     if (merged.price === void 0) delete merged.price;
+    if (merged.distance === void 0) delete merged.distance;
     this.#overrides = {
       ...this.#overrides,
       [id]: merged
@@ -9711,13 +9713,22 @@ var Catalog = class {
    * The enabled actors as options for a command argument (COM-57). The value is
    * the catalog key rather than an id, because the same actor is numbered
    * differently in each game — sail.spawn resolves it per game. Each carries
-   * its price, so `!spawn ganon` costs what the grid says it costs.
+   * its price, so `!spawn ganon` costs what the grid says it costs, and its
+   * spawn distance as `meta.distance` for the step to pass to safespawn.
+   *
+   * Every actor carries a distance rather than only the overridden ones:
+   * `{arg.actor.meta.distance}` fails the step when the chosen option doesn't
+   * have the key, which is the right behaviour for a typo but would otherwise
+   * break `!spawn` for every actor nobody had tuned yet.
    */
   actorOptions() {
     return this.#actors.filter((e) => this.actorEnabled(e)).map((e) => ({
       value: e.key,
       label: e.name,
-      cost: this.actorPrice(e)
+      cost: this.actorPrice(e),
+      meta: {
+        distance: String(this.actorDistance(e))
+      }
     }));
   }
   actorEnabled(e) {
@@ -9725,6 +9736,10 @@ var Catalog = class {
   }
   actorPrice(e) {
     return this.#ov("actor", e.key).price ?? DEFAULT_ACTOR_PRICE[e.kind];
+  }
+  /** Streamer override, else the catalog's own value, else the game default. */
+  actorDistance(e) {
+    return this.#ov("actor", e.key).distance ?? e.distance ?? DEFAULT_ACTOR_DISTANCE;
   }
   actorGames(e) {
     const games = [];
@@ -9776,7 +9791,9 @@ var Catalog = class {
           games: this.actorGames(e),
           price: this.actorPrice(e),
           defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
-          enabled: this.actorEnabled(e)
+          enabled: this.actorEnabled(e),
+          distance: this.actorDistance(e),
+          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE
         });
         if (out.length >= limit) break;
       }
@@ -9971,7 +9988,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
   </div>
   <table>
     <thead>
-      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th></tr>
+      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
@@ -10055,6 +10072,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
       var body = $("rows");
       body.innerHTML = "";
       $("count").textContent = rows.length + (total > rows.length ? " of " + total + " (filter to see more)" : "");
+      $("distHead").textContent = kind === "actor" ? "Distance" : "";
       rows.forEach(function (r) {
         var tr = document.createElement("tr");
 
@@ -10089,6 +10107,21 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
           req({ type: "price", entryKind: r.kind, key: r.key, price: isNaN(v) ? null : v });
         });
         priceCell.appendChild(price); tr.appendChild(priceCell);
+
+        // Distance is spawn-only, so items get an empty cell.
+        var distCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var dist = document.createElement("input");
+          dist.type = "text"; dist.className = "price"; dist.value = String(r.distance);
+          dist.title = "how far in front of the player it spawns (default " + r.defaultDistance + ") \u2014 blank to reset";
+          dist.addEventListener("change", function () {
+            var v = parseInt(dist.value, 10);
+            req({ type: "distance", key: r.key, distance: isNaN(v) ? null : v })
+              .then(loadRows);
+          });
+          distCell.appendChild(dist);
+        }
+        tr.appendChild(distCell);
 
         body.appendChild(tr);
       });
@@ -10328,14 +10361,18 @@ var plugin = definePlugin({
           // safespawn puts the actor in front of the player rather than on
           // their head, and loads its object first so actors the current scene
           // never loaded still work. Both games have it (SoH 9.2.3 was patched
-          // to match 2S2H). The trailing 0 is the spawn parameter.
+          // to match 2S2H).
+          //
+          // `params` is everything after the actor id, so this sends
+          // `safespawn <id> 0 <distance>` — 0 is the spawn parameter, and the
+          // distance is the actor's own, editable per actor in the Sail tab.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
             soh_verb: "safespawn",
-            params: "0"
+            params: "0 {arg.actor.meta.distance}"
           }
         },
         {
@@ -10495,6 +10532,16 @@ async function handleTabRequest(ctx, catalog, raw) {
       const price = typeof req.price === "number" && req.price >= 0 ? req.price : void 0;
       catalog.setOverride(kind, String(req.key), {
         price
+      });
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return {
+        ok: true
+      };
+    }
+    case "distance": {
+      const distance = typeof req.distance === "number" && req.distance > 0 ? req.distance : void 0;
+      catalog.setOverride("actor", String(req.key), {
+        distance
       });
       ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
       return {

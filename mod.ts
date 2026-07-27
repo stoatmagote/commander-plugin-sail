@@ -222,14 +222,18 @@ const plugin: Plugin = definePlugin({
           // safespawn puts the actor in front of the player rather than on
           // their head, and loads its object first so actors the current scene
           // never loaded still work. Both games have it (SoH 9.2.3 was patched
-          // to match 2S2H). The trailing 0 is the spawn parameter.
+          // to match 2S2H).
+          //
+          // `params` is everything after the actor id, so this sends
+          // `safespawn <id> 0 <distance>` — 0 is the spawn parameter, and the
+          // distance is the actor's own, editable per actor in the Sail tab.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
             soh_verb: "safespawn",
-            params: "0",
+            params: "0 {arg.actor.meta.distance}",
           },
         },
         {
@@ -369,6 +373,16 @@ async function handleTabRequest(
         ? req.price
         : undefined;
       catalog.setOverride(kind, String(req.key), { price });
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return { ok: true };
+    }
+    case "distance": {
+      // Actors only — items are given, not spawned. A blank box clears the
+      // override and falls back to the catalog/game default.
+      const distance = typeof req.distance === "number" && req.distance > 0
+        ? req.distance
+        : undefined;
+      catalog.setOverride("actor", String(req.key), { distance });
       ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
       return { ok: true };
     }

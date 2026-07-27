@@ -63,7 +63,7 @@ export const TAB_HTML: string = String.raw`
   </div>
   <table>
     <thead>
-      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th></tr>
+      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
@@ -147,6 +147,7 @@ export const TAB_HTML: string = String.raw`
       var body = $("rows");
       body.innerHTML = "";
       $("count").textContent = rows.length + (total > rows.length ? " of " + total + " (filter to see more)" : "");
+      $("distHead").textContent = kind === "actor" ? "Distance" : "";
       rows.forEach(function (r) {
         var tr = document.createElement("tr");
 
@@ -181,6 +182,21 @@ export const TAB_HTML: string = String.raw`
           req({ type: "price", entryKind: r.kind, key: r.key, price: isNaN(v) ? null : v });
         });
         priceCell.appendChild(price); tr.appendChild(priceCell);
+
+        // Distance is spawn-only, so items get an empty cell.
+        var distCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var dist = document.createElement("input");
+          dist.type = "text"; dist.className = "price"; dist.value = String(r.distance);
+          dist.title = "how far in front of the player it spawns (default " + r.defaultDistance + ") — blank to reset";
+          dist.addEventListener("change", function () {
+            var v = parseInt(dist.value, 10);
+            req({ type: "distance", key: r.key, distance: isNaN(v) ? null : v })
+              .then(loadRows);
+          });
+          distCell.appendChild(dist);
+        }
+        tr.appendChild(distCell);
 
         body.appendChild(tr);
       });

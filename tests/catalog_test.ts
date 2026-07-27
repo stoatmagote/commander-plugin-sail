@@ -77,6 +77,48 @@ Deno.test("default prices scale by kind; bosses cost more", () => {
   if (dodongo.kind === "match") assertEquals(c.actorPrice(dodongo.entry), 300);
 });
 
+Deno.test("spawn distance: game default, catalog value, then override", () => {
+  const c = new Catalog({
+    actors: [
+      { key: "A_PLAIN", name: "plain", kind: "actor", soh: 1 },
+      { key: "A_BIG", name: "big", kind: "boss", soh: 2, distance: 400 },
+    ],
+    items: [],
+  });
+  const plain = c.actorByKey("A_PLAIN")!;
+  const big = c.actorByKey("A_BIG")!;
+
+  // Untuned actors keep safespawn's own default, so nothing changes for them.
+  assertEquals(c.actorDistance(plain), 120);
+  assertEquals(c.actorDistance(big), 400, "the catalog's own value wins");
+
+  c.setOverride("actor", "A_BIG", { distance: 600 });
+  assertEquals(c.actorDistance(big), 600, "the streamer's override wins");
+
+  c.setOverride("actor", "A_BIG", { distance: undefined });
+  assertEquals(c.actorDistance(big), 400, "clearing falls back, not to 120");
+});
+
+Deno.test("every actor option carries a distance, tuned or not", () => {
+  const c = new Catalog(DATA);
+  // The !spawn step templates {arg.actor.meta.distance}, which fails the step
+  // when the chosen option lacks the key — so it can't be present only on the
+  // handful of actors someone has tuned.
+  const options = c.actorOptions();
+  assert(options.length > 0);
+  for (const o of options) {
+    assertEquals(
+      typeof o.meta?.distance,
+      "string",
+      `${o.value} has no distance`,
+    );
+  }
+
+  c.setOverride("actor", "ACTOR_EN_NIW", { distance: 300 });
+  const cucco = c.actorOptions().find((o) => o.value === "ACTOR_EN_NIW");
+  assertEquals(cucco?.meta?.distance, "300");
+});
+
 Deno.test("everything is enabled by default", () => {
   const c = new Catalog(DATA);
   const r = c.resolveActor("cucco");
