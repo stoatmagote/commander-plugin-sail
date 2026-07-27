@@ -219,13 +219,17 @@ const plugin: Plugin = definePlugin({
       params: [{ name: "actor", type: "choice", optionSource: "sail.actors" }],
       steps: [
         {
-          // safespawn keeps the actor out of geometry; the trailing 0 is the
-          // spawn parameter the games expect.
+          // Each game gets the mechanism it actually has: 2S2H's custom
+          // safespawn console command, and on SoH the SpawnEnemyWithOffset
+          // effect (SoH has no safespawn, and its console `spawn` drops the
+          // actor on the player's head). The trailing 0 is the spawn
+          // parameter both games expect.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
+            soh_verb: "SpawnEnemyWithOffset",
             params: "0",
           },
         },

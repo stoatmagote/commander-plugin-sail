@@ -11,6 +11,7 @@ import type { SailDispatch } from "../src/dispatch.ts";
 import {
   buildSpawnCommand,
   buildSpawnFunction,
+  buildSpawnPacket,
   parseActorId,
   parseSpawnActorId,
   SpawnConfirmer,
@@ -105,6 +106,32 @@ Deno.test("buildSpawnCommand formats verb + decimal id + extras", () => {
   assertEquals(buildSpawnCommand("spawn", 24, ""), "spawn 24");
   assertEquals(buildSpawnCommand("safespawn", 3, "1 2 3"), "safespawn 3 1 2 3");
   assertEquals(buildSpawnCommand("bogus", 5, ""), "spawn 5", "verb falls back");
+});
+
+Deno.test("buildSpawnPacket sends a console command for console verbs", () => {
+  assertEquals(buildSpawnPacket("safespawn", 3, "0"), {
+    type: "command",
+    command: "safespawn 3 0",
+  });
+});
+
+Deno.test("buildSpawnPacket sends an effect for SoH's spawn effects", () => {
+  // SoH has no safespawn; SpawnEnemyWithOffset is what places the actor away
+  // from the player, and it goes out as an effect, not a console command.
+  assertEquals(buildSpawnPacket("SpawnEnemyWithOffset", 24, "0"), {
+    type: "effect",
+    effect: {
+      type: "apply",
+      name: "SpawnEnemyWithOffset",
+      parameters: [24, 0],
+    },
+  });
+  // The extra argument is free text shared with the console path, so a
+  // non-numeric one must not fail a spawn the viewer already paid for.
+  assertEquals(buildSpawnPacket("SpawnActor", 7, "not a number"), {
+    type: "effect",
+    effect: { type: "apply", name: "SpawnActor", parameters: [7, 0] },
+  });
 });
 
 // ---- confirmer, with injected timers ----
@@ -214,7 +241,16 @@ Deno.test("AC: a confirmed spawn succeeds (charge stands)", async () => {
   const res = await run;
   assert(res.ok);
   if (res.ok) assertEquals(res.out?.actorId, 24);
-  assertEquals(sent[0].body, { type: "command", command: "spawn 24" });
+  // SoH spawns via the effect, which is what places the actor away from the
+  // player — its console `spawn` drops it on your head.
+  assertEquals(sent[0].body, {
+    type: "effect",
+    effect: {
+      type: "apply",
+      name: "SpawnEnemyWithOffset",
+      parameters: [24, 0],
+    },
+  });
 });
 
 Deno.test("AC: an unconfirmed spawn fails so the engine refunds", async () => {
@@ -276,7 +312,8 @@ Deno.test("2S2H spawn subscribes to OnActorInit (filtered) and unsubscribes", as
   );
   assertEquals(types[0], "subscribe:OnActorInit", "subscribed first");
   assertEquals(sent[0].body.eventIdFilter, 42, "filtered to the actor");
-  assert(types.includes("command:spawn 42"), "then spawned");
+  // 2S2H keeps the console path — it's the game with the custom safespawn.
+  assert(types.includes("command:safespawn 42"), "then spawned");
   assertEquals(
     types[types.length - 1],
     "unsubscribe:OnActorInit",
@@ -296,12 +333,24 @@ Deno.test("a catalog key spawns the right id in each game", async () => {
   );
   assert(result.ok);
   assertEquals(result.out?.name, "cucco");
-  // The same actor, numbered differently: 25 in SoH, 17 in 2S2H.
-  const commands = sent.map((s) =>
-    (s.body as { command?: string }).command ?? ""
+  // The same actor, numbered differently: 25 in SoH, 17 in 2S2H — and each
+  // game gets the mechanism it actually supports (SoH an effect, 2S2H a
+  // console command), so check where the id landed for each.
+  const soh = sent.find((s) => s.game === "soh")?.body as {
+    effect?: { parameters?: number[] };
+  };
+  assertEquals(
+    soh?.effect?.parameters?.[0],
+    25,
+    `SoH got: ${JSON.stringify(soh)}`,
   );
-  assert(commands.some((c) => c.includes("25")), `SoH got: ${commands}`);
-  assert(commands.some((c) => c.includes("17")), `2S2H got: ${commands}`);
+
+  const s2h = sent.find((s) => s.game === "2s2h")?.body as { command?: string };
+  assertEquals(
+    s2h?.command,
+    "safespawn 17",
+    `2S2H got: ${JSON.stringify(s2h)}`,
+  );
 });
 
 Deno.test("an actor missing from a connected game is skipped, not failed", async () => {

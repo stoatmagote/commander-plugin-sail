@@ -15,7 +15,7 @@
 // confirm a spawn of a different actor.
 
 import type { FunctionResult, FunctionSpec } from "@twitch-commander/plugin";
-import type { SailGame, SailHook } from "./protocol.ts";
+import type { OutgoingBody, SailGame, SailHook } from "./protocol.ts";
 import { describeOffline, liveGames, type SailDispatch } from "./dispatch.ts";
 import { readTarget, targetParam } from "./functions.ts";
 import type { Catalog } from "./catalog.ts";
@@ -50,6 +50,63 @@ export function buildSpawnCommand(
   const v = SPAWN_VERBS.includes(verb) ? verb : "spawn";
   const extra = params.trim();
   return extra ? `${v} ${actorId} ${extra}` : `${v} ${actorId}`;
+}
+
+/**
+ * Spawn mechanisms that go out as a Sail *effect* instead of a console command.
+ *
+ * SoH has no `safespawn`: its console `spawn` drops the actor on the player's
+ * head. But SoH's Sail does implement the CrowdControl effects, and two of them
+ * spawn actors properly — so on SoH we spawn through an effect rather than the
+ * console. (2S2H is the mirror image: it stubs apply/remove effects, and has
+ * the custom `safespawn` console command instead.)
+ *
+ *   SpawnEnemyWithOffset — a random point ~150 units from the player, raycast
+ *                          down to the floor. This is the one that fixes
+ *                          "it spawned on top of me".
+ *   SpawnActor           — at the player's feet, but with SoH's own special
+ *                          cases (a Cucco drops from above and is angry, a bomb
+ *                          can be spawned already lit).
+ *
+ * Neither preloads the actor's object, so an actor whose object the current
+ * scene didn't load still can't spawn — SoH answers TemporarilyNotPossible,
+ * which Sail reports as `try_again` and the client retries before giving up.
+ */
+export const SPAWN_EFFECTS: readonly string[] = [
+  "SpawnEnemyWithOffset",
+  "SpawnActor",
+];
+
+/** Every spawn mechanism a step may pick, console verbs and effects alike. */
+export const SPAWN_MECHANISMS: readonly string[] = [
+  ...SPAWN_VERBS,
+  ...SPAWN_EFFECTS,
+];
+
+/** The packet a spawn sends — a console command, or an effect on SoH. */
+export function buildSpawnPacket(
+  verb: string,
+  actorId: number,
+  params: string,
+): OutgoingBody {
+  if (!SPAWN_EFFECTS.includes(verb)) {
+    return {
+      type: "command",
+      command: buildSpawnCommand(verb, actorId, params),
+    };
+  }
+  // Effects take (id, params) as numbers. The extra argument is free text
+  // shared with the console path, so anything non-numeric becomes 0 rather
+  // than failing a spawn the viewer already paid for.
+  const extra = Number.parseInt(params.trim(), 10);
+  return {
+    type: "effect",
+    effect: {
+      type: "apply",
+      name: verb,
+      parameters: [actorId, Number.isFinite(extra) ? extra : 0],
+    },
+  };
 }
 
 interface Waiter {
@@ -162,16 +219,13 @@ export class Spawner {
     actorId: number,
     opts: SpawnOptions,
   ): Promise<boolean> {
-    const command = buildSpawnCommand(
+    const packet = buildSpawnPacket(
       opts.verb ?? "spawn",
       actorId,
       opts.extra ?? "",
     );
     if (!opts.confirm) {
-      const status = await this.#dispatch.send(game, {
-        type: "command",
-        command,
-      });
+      const status = await this.#dispatch.send(game, packet);
       return status === "success";
     }
 
@@ -179,10 +233,7 @@ export class Spawner {
     try {
       // Register the wait BEFORE sending, so a fast OnActorInit isn't missed.
       const wait = this.#confirmer.await(game, actorId, opts.windowMs);
-      const status = await this.#dispatch.send(game, {
-        type: "command",
-        command,
-      });
+      const status = await this.#dispatch.send(game, packet);
       if (status !== "success") {
         wait.cancel(); // parse/refused — don't burn the whole window
         return false;
@@ -262,23 +313,23 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
       },
       {
         key: "verb",
-        label: "Spawn command",
+        label: "Spawn command for 2S2H",
         type: "select",
         options: [...SPAWN_VERBS],
         default: "safespawn",
       },
       {
-        // The games aren't symmetric: 2S2H has the custom `safespawn` (which
-        // preloads the actor's object and places it in front of the player),
-        // SoH only has vanilla `spawn`, which drops the actor on top of you and
-        // fails for objects the scene hasn't loaded. Sending safespawn to SoH
-        // is just an unknown command, so it gets its own verb until it's
-        // patched to match.
+        // The games aren't symmetric. 2S2H has the custom `safespawn` console
+        // command (preloads the object, places the actor in front of you); SoH
+        // has no such command — its console `spawn` drops the actor on your
+        // head — but SoH *does* implement the Sail effects, and
+        // SpawnEnemyWithOffset places the actor properly. So each game gets the
+        // mechanism it actually supports.
         key: "soh_verb",
-        label: "Spawn command for SoH",
+        label: "Spawn mechanism for SoH",
         type: "select",
-        options: [...SPAWN_VERBS],
-        default: "spawn",
+        options: [...SPAWN_MECHANISMS],
+        default: "SpawnEnemyWithOffset",
       },
       {
         key: "params",
@@ -315,10 +366,14 @@ export function buildSpawnFunction(deps: SpawnFnDeps): FunctionSpec {
         return fail(`${entry?.name ?? raw} isn't in the connected game`);
       }
 
+      // Defaults here rather than leaning on the ParamSpec `default`, which the
+      // engine only uses to prefill the editor — a step saved before soh_verb
+      // existed has no value for it, and must not fall through to the 2S2H
+      // verb (sending `safespawn` to SoH is just an unknown command).
       const verbFor = (game: SailGame) =>
         game === "soh"
-          ? (ctx.params.soh_verb || ctx.params.verb || "spawn")
-          : (ctx.params.verb || "spawn");
+          ? (ctx.params.soh_verb || "SpawnEnemyWithOffset")
+          : (ctx.params.verb || "safespawn");
       const opts = {
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),

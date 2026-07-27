@@ -18,7 +18,6 @@ import {
   liveGames,
   SAIL_TARGETS,
   type SailDispatch,
-  type SailTarget,
   type TargetSpec,
 } from "./dispatch.ts";
 
@@ -101,6 +100,24 @@ export function splitCommands(raw: string | undefined): string[] {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * The CVar each game reads to decide whether the world is mirrored *right now*.
+ *
+ * Both games also have a "mode" CVar (off / always / dungeons / random), but
+ * mode only turns into state when a scene loads, via an init function the
+ * console can't reach — which is why setting the mode remotely looks like it
+ * does nothing. These state CVars are read per-frame by the renderer (view
+ * matrix, culling, HUD, and even the audio channel swap), so setting one flips
+ * the world immediately.
+ *
+ * The names differ per game, and both were renamed out of the old flat
+ * namespace (`gMirroredWorld`), which is why one shared `set` can't work.
+ */
+export const MIRROR_CVAR: Record<SailGame, string> = {
+  soh: "gEnhancements.MirroredWorld",
+  "2s2h": "gModes.MirroredWorld.State",
+};
+
 /** The target param, shared by the functions that accept one. */
 export function targetParam() {
   return {
@@ -167,9 +184,9 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
 
     {
       id: "notify",
-      name: "Show a notification in-game",
+      name: "Show a notification in-game (2S2H only)",
       description:
-        "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command.",
+        "Pop a message up on screen — e.g. announcing who redeemed something. Sends the game's `notify` console command. Only 2S2H has that command: SoH accepts it and shows nothing, so a step aimed at SoH quietly does nothing rather than failing (it must not refund a spawn that worked).",
       requires: { account: "none" },
       params: [
         {
@@ -205,6 +222,41 @@ export function buildSailFunctions(deps: SailFnDeps): FunctionSpec[] {
             status: await dispatch.send(game, {
               type: "command",
               command: `notify ${message}`,
+            }),
+          })),
+        );
+        return summarize(results);
+      },
+    },
+
+    {
+      id: "mirror",
+      name: "Mirror the world",
+      description:
+        "Flip the world horizontally, right now. Each game keeps this in a differently-named CVar, so this picks the right one per game — a single `set` can't cover both.",
+      requires: { account: "none" },
+      params: [
+        targetParam(),
+        {
+          key: "state",
+          label: "Mirrored",
+          type: "select",
+          options: ["on", "off"],
+          default: "on",
+        },
+      ],
+      run: async (ctx) => {
+        const on = (ctx.params.state ?? "on").trim().toLowerCase() !== "off";
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+
+        const results = await Promise.all(
+          games.map(async (game) => ({
+            game,
+            status: await dispatch.send(game, {
+              type: "command",
+              command: `set ${MIRROR_CVAR[game]} ${on ? 1 : 0}`,
             }),
           })),
         );

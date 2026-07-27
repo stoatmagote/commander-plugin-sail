@@ -389,6 +389,39 @@ Deno.test("notify collapses newlines and refuses an empty message", async () => 
   assert(!nogame.ok, "with nothing connected the step fails, so it refunds");
 });
 
+// ---- sail.mirror ----
+
+Deno.test("mirror sets each game's own state CVar", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh", "2s2h"]);
+  const mirror = fns(dispatch).get("mirror")!;
+
+  const on = await mirror.run(ctxOf({ target: "both", state: "on" }));
+  assert(on.ok);
+  // The two games renamed this CVar differently, so one shared `set` can't
+  // cover both — that's what made !mirror silently do nothing on SoH.
+  assertEquals(sent.map((s) => (s.body as { command?: string }).command), [
+    "set gEnhancements.MirroredWorld 1",
+    "set gModes.MirroredWorld.State 1",
+  ]);
+});
+
+Deno.test("mirror off clears the CVar, and defaults to on", async () => {
+  const { dispatch, sent } = fakeDispatch(["soh"]);
+  const mirror = fns(dispatch).get("mirror")!;
+
+  await mirror.run(ctxOf({ target: "soh", state: "off" }));
+  assertEquals(
+    (sent[0].body as { command?: string }).command,
+    "set gEnhancements.MirroredWorld 0",
+  );
+
+  await mirror.run(ctxOf({ target: "soh" }));
+  assertEquals(
+    (sent[1].body as { command?: string }).command,
+    "set gEnhancements.MirroredWorld 1",
+  );
+});
+
 // ---- targeting the games an earlier step acted on (COM-62 follow-up) ----
 
 Deno.test("an explicit game list targets only those games", async () => {

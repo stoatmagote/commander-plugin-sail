@@ -128,6 +128,10 @@ var fail = (error) => ({
 function splitCommands(raw) {
   return (raw ?? "").split(/[;\n]/).map((line) => line.trim()).filter((line) => line.length > 0);
 }
+var MIRROR_CVAR = {
+  soh: "gEnhancements.MirroredWorld",
+  "2s2h": "gModes.MirroredWorld.State"
+};
 function targetParam() {
   return {
     key: "target",
@@ -190,8 +194,8 @@ function buildSailFunctions(deps) {
     },
     {
       id: "notify",
-      name: "Show a notification in-game",
-      description: "Pop a message up on screen \u2014 e.g. announcing who redeemed something. Sends the game's `notify` console command.",
+      name: "Show a notification in-game (2S2H only)",
+      description: "Pop a message up on screen \u2014 e.g. announcing who redeemed something. Sends the game's `notify` console command. Only 2S2H has that command: SoH accepts it and shows nothing, so a step aimed at SoH quietly does nothing rather than failing (it must not refund a spawn that worked).",
       requires: {
         account: "none"
       },
@@ -224,6 +228,41 @@ function buildSailFunctions(deps) {
           status: await dispatch.send(game, {
             type: "command",
             command: `notify ${message}`
+          })
+        })));
+        return summarize(results);
+      }
+    },
+    {
+      id: "mirror",
+      name: "Mirror the world",
+      description: "Flip the world horizontally, right now. Each game keeps this in a differently-named CVar, so this picks the right one per game \u2014 a single `set` can't cover both.",
+      requires: {
+        account: "none"
+      },
+      params: [
+        targetParam(),
+        {
+          key: "state",
+          label: "Mirrored",
+          type: "select",
+          options: [
+            "on",
+            "off"
+          ],
+          default: "on"
+        }
+      ],
+      run: async (ctx) => {
+        const on = (ctx.params.state ?? "on").trim().toLowerCase() !== "off";
+        const target = readTarget(ctx.params.target);
+        const games = liveGames(target, isConnected);
+        if (games.length === 0) return fail(describeOffline(target));
+        const results = await Promise.all(games.map(async (game) => ({
+          game,
+          status: await dispatch.send(game, {
+            type: "command",
+            command: `set ${MIRROR_CVAR[game]} ${on ? 1 : 0}`
           })
         })));
         return summarize(results);
@@ -2530,6 +2569,34 @@ function buildSpawnCommand(verb, actorId, params) {
   const extra = params.trim();
   return extra ? `${v} ${actorId} ${extra}` : `${v} ${actorId}`;
 }
+var SPAWN_EFFECTS = [
+  "SpawnEnemyWithOffset",
+  "SpawnActor"
+];
+var SPAWN_MECHANISMS = [
+  ...SPAWN_VERBS,
+  ...SPAWN_EFFECTS
+];
+function buildSpawnPacket(verb, actorId, params) {
+  if (!SPAWN_EFFECTS.includes(verb)) {
+    return {
+      type: "command",
+      command: buildSpawnCommand(verb, actorId, params)
+    };
+  }
+  const extra = Number.parseInt(params.trim(), 10);
+  return {
+    type: "effect",
+    effect: {
+      type: "apply",
+      name: verb,
+      parameters: [
+        actorId,
+        Number.isFinite(extra) ? extra : 0
+      ]
+    }
+  };
+}
 var SpawnConfirmer = class {
   #waiters = [];
   #setTimer;
@@ -2599,21 +2666,15 @@ var Spawner = class {
   }
   /** Spawn one actor on one game; resolves true only if it was confirmed. */
   async spawn(game, actorId, opts) {
-    const command = buildSpawnCommand(opts.verb ?? "spawn", actorId, opts.extra ?? "");
+    const packet = buildSpawnPacket(opts.verb ?? "spawn", actorId, opts.extra ?? "");
     if (!opts.confirm) {
-      const status = await this.#dispatch.send(game, {
-        type: "command",
-        command
-      });
+      const status = await this.#dispatch.send(game, packet);
       return status === "success";
     }
     if (game === "2s2h") await this.#acquire2s2h(actorId);
     try {
       const wait = this.#confirmer.await(game, actorId, opts.windowMs);
-      const status = await this.#dispatch.send(game, {
-        type: "command",
-        command
-      });
+      const status = await this.#dispatch.send(game, packet);
       if (status !== "success") {
         wait.cancel();
         return false;
@@ -2676,7 +2737,7 @@ function buildSpawnFunction(deps) {
       },
       {
         key: "verb",
-        label: "Spawn command",
+        label: "Spawn command for 2S2H",
         type: "select",
         options: [
           ...SPAWN_VERBS
@@ -2684,19 +2745,19 @@ function buildSpawnFunction(deps) {
         default: "safespawn"
       },
       {
-        // The games aren't symmetric: 2S2H has the custom `safespawn` (which
-        // preloads the actor's object and places it in front of the player),
-        // SoH only has vanilla `spawn`, which drops the actor on top of you and
-        // fails for objects the scene hasn't loaded. Sending safespawn to SoH
-        // is just an unknown command, so it gets its own verb until it's
-        // patched to match.
+        // The games aren't symmetric. 2S2H has the custom `safespawn` console
+        // command (preloads the object, places the actor in front of you); SoH
+        // has no such command — its console `spawn` drops the actor on your
+        // head — but SoH *does* implement the Sail effects, and
+        // SpawnEnemyWithOffset places the actor properly. So each game gets the
+        // mechanism it actually supports.
         key: "soh_verb",
-        label: "Spawn command for SoH",
+        label: "Spawn mechanism for SoH",
         type: "select",
         options: [
-          ...SPAWN_VERBS
+          ...SPAWN_MECHANISMS
         ],
-        default: "spawn"
+        default: "SpawnEnemyWithOffset"
       },
       {
         key: "params",
@@ -2721,7 +2782,7 @@ function buildSpawnFunction(deps) {
       if (targets.length === 0) {
         return fail2(`${entry?.name ?? raw} isn't in the connected game`);
       }
-      const verbFor = (game) => game === "soh" ? ctx.params.soh_verb || ctx.params.verb || "spawn" : ctx.params.verb || "spawn";
+      const verbFor = (game) => game === "soh" ? ctx.params.soh_verb || "SpawnEnemyWithOffset" : ctx.params.verb || "safespawn";
       const opts = {
         extra: ctx.params.params ?? "",
         confirm: deps.confirmEnabled(),
@@ -10265,13 +10326,17 @@ var plugin = definePlugin({
       ],
       steps: [
         {
-          // safespawn keeps the actor out of geometry; the trailing 0 is the
-          // spawn parameter the games expect.
+          // Each game gets the mechanism it actually has: 2S2H's custom
+          // safespawn console command, and on SoH the SpawnEnemyWithOffset
+          // effect (SoH has no safespawn, and its console `spawn` drops the
+          // actor on the player's head). The trailing 0 is the spawn
+          // parameter both games expect.
           functionId: "sail.spawn",
           params: {
             target: "any",
             actorId: "{arg.actor}",
             verb: "safespawn",
+            soh_verb: "SpawnEnemyWithOffset",
             params: "0"
           }
         },
