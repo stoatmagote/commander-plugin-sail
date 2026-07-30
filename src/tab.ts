@@ -23,6 +23,8 @@ export const TAB_HTML: string = String.raw`
   button.sel { border-color: #9b6bff; color: #9b6bff; }
   input[type=text], input[type=search] { background: #17151d; border: 1px solid #322e3f; color: #e8e5f0; border-radius: 8px; padding: .35rem .6rem; }
   input.price { width: 4.5rem; text-align: right; }
+  input.alias { width: 12rem; }
+  .warn { color: #e39b8a; font-size: .82rem; }
   table { width: 100%; border-collapse: collapse; font-size: .9rem; }
   th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #262230; }
   th { color: #9b95ab; font-weight: 600; }
@@ -60,10 +62,11 @@ export const TAB_HTML: string = String.raw`
     <button id="tab-item" data-kind="item">Items</button>
     <input type="search" id="filter" placeholder="filter by name…" />
     <span class="muted" id="count"></span>
+    <span class="warn" id="gridMsg"></span>
   </div>
   <table>
     <thead>
-      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th></tr>
+      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th><th id="aliasHead"></th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
@@ -87,6 +90,7 @@ export const TAB_HTML: string = String.raw`
     function req(msg) { return commander.request(msg); }
 
     function setMsg(t) { $("launchMsg").textContent = t; }
+    function gridMsg(t) { $("gridMsg").textContent = t || ""; }
 
     // Launch buttons.
     Array.prototype.forEach.call(document.querySelectorAll(".launch"), function (b) {
@@ -148,6 +152,7 @@ export const TAB_HTML: string = String.raw`
       body.innerHTML = "";
       $("count").textContent = rows.length + (total > rows.length ? " of " + total + " (filter to see more)" : "");
       $("distHead").textContent = kind === "actor" ? "Distance" : "";
+      $("aliasHead").textContent = kind === "actor" ? "Also known as" : "";
       rows.forEach(function (r) {
         var tr = document.createElement("tr");
 
@@ -197,6 +202,27 @@ export const TAB_HTML: string = String.raw`
           distCell.appendChild(dist);
         }
         tr.appendChild(distCell);
+
+        // Aliases are spawn-side too — items are matched by their own name.
+        var aliasCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var al = document.createElement("input");
+          al.type = "text"; al.className = "alias";
+          al.value = (r.aliases || []).join(", ");
+          al.title = "other names chat can use, comma separated";
+          al.addEventListener("change", function () {
+            var list = al.value.split(",").map(function (s) { return s.trim(); })
+              .filter(function (s) { return s.length > 0; });
+            req({ type: "aliases", key: r.key, aliases: list }).then(function (res) {
+              // A rejected alias must not look accepted, so say why and let
+              // the reload put the saved value back in the box.
+              gridMsg(res && res.error ? res.error : "");
+              loadRows();
+            });
+          });
+          aliasCell.appendChild(al);
+        }
+        tr.appendChild(aliasCell);
 
         body.appendChild(tr);
       });

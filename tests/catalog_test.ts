@@ -119,6 +119,58 @@ Deno.test("every actor option carries a distance, tuned or not", () => {
   assertEquals(cucco?.meta?.distance, "300");
 });
 
+// ---- aliases (COM-64) ----
+
+Deno.test("aliases come from the catalog and can be overridden", () => {
+  const c = new Catalog({
+    actors: [
+      { key: "A_NIW", name: "cucco", kind: "actor", soh: 25, aliases: ["hen"] },
+    ],
+    items: [],
+  });
+  const niw = c.actorByKey("A_NIW")!;
+  assertEquals(c.actorAliases(niw), ["hen"]);
+
+  // The override replaces rather than extends, so a bundled alias can be
+  // removed as well as added to.
+  assertEquals(c.setActorAliases("A_NIW", ["chicken", "bird"]), { ok: true });
+  assertEquals(c.actorAliases(niw), ["chicken", "bird"]);
+
+  assertEquals(c.setActorAliases("A_NIW", []), { ok: true });
+  assertEquals(c.actorAliases(niw), [], "cleared, not fallen back to catalog");
+});
+
+Deno.test("an alias naming another entry is refused, not silently shadowing", () => {
+  const c = new Catalog(DATA);
+  const clash = c.setActorAliases("ACTOR_EN_NIW", ["dodongo"]);
+  assert(!clash.ok);
+  if (!clash.ok) assert(clash.error.includes("dodongo"));
+  assertEquals(c.actorAliases(c.actorByKey("ACTOR_EN_NIW")!), [], "not saved");
+
+  // Compared normalized, so case and surrounding space can't sneak a
+  // duplicate past the check.
+  assert(!c.setActorAliases("ACTOR_EN_NIW", [" DoDonGo "]).ok);
+
+  // An entry's own name is redundant rather than an error.
+  assertEquals(c.setActorAliases("ACTOR_EN_NIW", ["Cucco", "hen"]), {
+    ok: true,
+  });
+  assertEquals(c.actorAliases(c.actorByKey("ACTOR_EN_NIW")!), ["hen"]);
+});
+
+Deno.test("options publish aliases, and the grid finds an entry by one", () => {
+  const c = new Catalog(DATA);
+  c.setActorAliases("ACTOR_EN_NIW", ["chicken"]);
+
+  const cucco = c.actorOptions().find((o) => o.value === "ACTOR_EN_NIW");
+  assertEquals(cucco?.aliases, ["chicken"]);
+  assertEquals(cucco?.label, "cucco", "the label stays canonical for chat");
+
+  // Searching the alias has to find it, or you can't look up what you added.
+  const found = c.rows("actor", "chicken");
+  assertEquals(found.map((r) => r.name), ["cucco"]);
+});
+
 Deno.test("everything is enabled by default", () => {
   const c = new Catalog(DATA);
   const r = c.resolveActor("cucco");

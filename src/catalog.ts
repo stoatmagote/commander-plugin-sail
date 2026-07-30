@@ -13,7 +13,7 @@
 
 import type { ChoiceOption } from "@twitch-commander/plugin";
 import type { SailGame } from "./protocol.ts";
-import { fuzzyResolve, type MatchResult } from "./fuzzy.ts";
+import { fuzzyResolve, type MatchResult, normalize } from "./fuzzy.ts";
 import { BUNDLED_CATALOG } from "./catalog.data.ts";
 
 export type ActorKind = "boss" | "enemy" | "actor";
@@ -26,6 +26,8 @@ export interface ActorEntry {
   s2h?: number; // actor id in 2S2H
   /** Baseline spawn distance for this actor; see actorDistance(). */
   distance?: number;
+  /** Other things a viewer might type for it ("chicken" for a cucco). */
+  aliases?: string[];
 }
 
 export interface ItemEntry {
@@ -46,6 +48,11 @@ export interface EntryOverride {
   price?: number;
   /** Actors only: how far in front of the player `safespawn` puts it. */
   distance?: number;
+  /**
+   * Actors only: replaces the catalog's aliases rather than adding to them, so
+   * the streamer can remove a bundled alias they don't want.
+   */
+  aliases?: string[];
 }
 /** key: `actor:<KEY>` or `item:<KEY>`. */
 export type Overrides = Record<string, EntryOverride>;
@@ -76,6 +83,8 @@ export interface CatalogRow {
   /** Actors only — items aren't spawned, so they have no distance. */
   distance?: number;
   defaultDistance?: number;
+  /** Actors only — other names this entry answers to. */
+  aliases?: string[];
 }
 
 export class Catalog {
@@ -118,6 +127,9 @@ export class Catalog {
     if (merged.enabled === true) delete merged.enabled;
     if (merged.price === undefined) delete merged.price;
     if (merged.distance === undefined) delete merged.distance;
+    // An empty list is kept, unlike the other fields: it's how "this entry has
+    // no aliases" is told apart from "no opinion, use the catalog's".
+    if (merged.aliases === undefined) delete merged.aliases;
     this.#overrides = { ...this.#overrides, [id]: merged };
     if (Object.keys(this.#overrides[id]).length === 0) {
       delete this.#overrides[id];
@@ -156,12 +168,19 @@ export class Catalog {
   actorOptions(): ChoiceOption[] {
     return this.#actors
       .filter((e) => this.actorEnabled(e))
-      .map((e) => ({
-        value: e.key,
-        label: e.name,
-        cost: this.actorPrice(e),
-        meta: { distance: String(this.actorDistance(e)) },
-      }));
+      .map((e) => {
+        const option: ChoiceOption = {
+          value: e.key,
+          label: e.name,
+          cost: this.actorPrice(e),
+          meta: { distance: String(this.actorDistance(e)) },
+        };
+        // The engine matches on these too, and still reports `label` — so
+        // `!spawn chicken` spawns a cucco and says "spawned a cucco".
+        const aliases = this.actorAliases(e);
+        if (aliases.length > 0) option.aliases = aliases;
+        return option;
+      });
   }
 
   actorEnabled(e: ActorEntry): boolean {
@@ -174,6 +193,64 @@ export class Catalog {
   actorDistance(e: ActorEntry): number {
     return this.#ov("actor", e.key).distance ?? e.distance ??
       DEFAULT_ACTOR_DISTANCE;
+  }
+  /** The names this actor also answers to (COM-64). */
+  actorAliases(e: ActorEntry): string[] {
+    return this.#ov("actor", e.key).aliases ?? e.aliases ?? [];
+  }
+
+  /**
+   * Set an actor's aliases, refusing any that already name something else.
+   *
+   * Two entries answering to the same word isn't a choice the viewer can make
+   * — the matcher would just pick one — so a collision is reported instead of
+   * silently shadowing the other entry. Comparison is normalized, so "Dark
+   * Link" and "dark-link" collide.
+   */
+  setActorAliases(
+    key: string,
+    aliases: readonly string[],
+  ): { ok: true } | { ok: false; error: string } {
+    const self = this.actorByKey(key);
+    if (!self) return { ok: false, error: `no actor called "${key}"` };
+
+    // What every *other* actor answers to, so we can spot a collision.
+    const taken = new Map<string, string>();
+    for (const other of this.#actors) {
+      if (other.key === self.key) continue;
+      for (const name of [other.name, ...this.actorAliases(other)]) {
+        const n = normalize(name);
+        if (n && !taken.has(n)) taken.set(n, other.name);
+      }
+    }
+
+    const cleaned: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of aliases) {
+      const alias = String(raw ?? "").trim();
+      const n = normalize(alias);
+      if (!n) continue;
+      // Its own name needs no alias — drop it rather than erroring, since
+      // that's a harmless thing to type.
+      if (n === normalize(self.name)) continue;
+      if (seen.has(n)) continue;
+      const clash = taken.get(n);
+      if (clash) {
+        return { ok: false, error: `"${alias}" already refers to ${clash}` };
+      }
+      seen.add(n);
+      cleaned.push(alias);
+    }
+
+    // Clearing an entry that ships with aliases has to record "none" rather
+    // than dropping the override, or the bundled ones come straight back and
+    // removing one is impossible. Clearing an entry that had none anyway
+    // stores nothing, so overrides stay minimal.
+    const bundled = (self.aliases ?? []).length > 0;
+    this.setOverride("actor", self.key, {
+      aliases: cleaned.length > 0 || bundled ? cleaned : undefined,
+    });
+    return { ok: true };
   }
   actorGames(e: ActorEntry): SailGame[] {
     const games: SailGame[] = [];
@@ -219,7 +296,13 @@ export class Catalog {
     const out: CatalogRow[] = [];
     if (kind === "actor") {
       for (const e of this.#actors) {
-        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f)) {
+        const aliases = this.actorAliases(e);
+        // Searching an alias has to find the entry, or an alias you added is
+        // impossible to look up again by the word you added.
+        if (
+          f && !e.name.includes(f) && !e.key.toLowerCase().includes(f) &&
+          !aliases.some((a) => a.toLowerCase().includes(f))
+        ) {
           continue;
         }
         out.push({
@@ -233,6 +316,7 @@ export class Catalog {
           enabled: this.actorEnabled(e),
           distance: this.actorDistance(e),
           defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
+          aliases,
         });
         if (out.length >= limit) break;
       }

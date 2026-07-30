@@ -9688,6 +9688,7 @@ var Catalog = class {
     if (merged.enabled === true) delete merged.enabled;
     if (merged.price === void 0) delete merged.price;
     if (merged.distance === void 0) delete merged.distance;
+    if (merged.aliases === void 0) delete merged.aliases;
     this.#overrides = {
       ...this.#overrides,
       [id]: merged
@@ -9722,14 +9723,19 @@ var Catalog = class {
    * break `!spawn` for every actor nobody had tuned yet.
    */
   actorOptions() {
-    return this.#actors.filter((e) => this.actorEnabled(e)).map((e) => ({
-      value: e.key,
-      label: e.name,
-      cost: this.actorPrice(e),
-      meta: {
-        distance: String(this.actorDistance(e))
-      }
-    }));
+    return this.#actors.filter((e) => this.actorEnabled(e)).map((e) => {
+      const option = {
+        value: e.key,
+        label: e.name,
+        cost: this.actorPrice(e),
+        meta: {
+          distance: String(this.actorDistance(e))
+        }
+      };
+      const aliases = this.actorAliases(e);
+      if (aliases.length > 0) option.aliases = aliases;
+      return option;
+    });
   }
   actorEnabled(e) {
     return this.#ov("actor", e.key).enabled ?? true;
@@ -9740,6 +9746,61 @@ var Catalog = class {
   /** Streamer override, else the catalog's own value, else the game default. */
   actorDistance(e) {
     return this.#ov("actor", e.key).distance ?? e.distance ?? DEFAULT_ACTOR_DISTANCE;
+  }
+  /** The names this actor also answers to (COM-64). */
+  actorAliases(e) {
+    return this.#ov("actor", e.key).aliases ?? e.aliases ?? [];
+  }
+  /**
+   * Set an actor's aliases, refusing any that already name something else.
+   *
+   * Two entries answering to the same word isn't a choice the viewer can make
+   * — the matcher would just pick one — so a collision is reported instead of
+   * silently shadowing the other entry. Comparison is normalized, so "Dark
+   * Link" and "dark-link" collide.
+   */
+  setActorAliases(key, aliases) {
+    const self = this.actorByKey(key);
+    if (!self) return {
+      ok: false,
+      error: `no actor called "${key}"`
+    };
+    const taken = /* @__PURE__ */ new Map();
+    for (const other of this.#actors) {
+      if (other.key === self.key) continue;
+      for (const name of [
+        other.name,
+        ...this.actorAliases(other)
+      ]) {
+        const n = normalize(name);
+        if (n && !taken.has(n)) taken.set(n, other.name);
+      }
+    }
+    const cleaned = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of aliases) {
+      const alias = String(raw ?? "").trim();
+      const n = normalize(alias);
+      if (!n) continue;
+      if (n === normalize(self.name)) continue;
+      if (seen.has(n)) continue;
+      const clash = taken.get(n);
+      if (clash) {
+        return {
+          ok: false,
+          error: `"${alias}" already refers to ${clash}`
+        };
+      }
+      seen.add(n);
+      cleaned.push(alias);
+    }
+    const bundled = (self.aliases ?? []).length > 0;
+    this.setOverride("actor", self.key, {
+      aliases: cleaned.length > 0 || bundled ? cleaned : void 0
+    });
+    return {
+      ok: true
+    };
   }
   actorGames(e) {
     const games = [];
@@ -9780,7 +9841,8 @@ var Catalog = class {
     const out = [];
     if (kind === "actor") {
       for (const e of this.#actors) {
-        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f)) {
+        const aliases = this.actorAliases(e);
+        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f) && !aliases.some((a) => a.toLowerCase().includes(f))) {
           continue;
         }
         out.push({
@@ -9793,7 +9855,8 @@ var Catalog = class {
           defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
           enabled: this.actorEnabled(e),
           distance: this.actorDistance(e),
-          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE
+          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
+          aliases
         });
         if (out.length >= limit) break;
       }
@@ -9948,6 +10011,8 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
   button.sel { border-color: #9b6bff; color: #9b6bff; }
   input[type=text], input[type=search] { background: #17151d; border: 1px solid #322e3f; color: #e8e5f0; border-radius: 8px; padding: .35rem .6rem; }
   input.price { width: 4.5rem; text-align: right; }
+  input.alias { width: 12rem; }
+  .warn { color: #e39b8a; font-size: .82rem; }
   table { width: 100%; border-collapse: collapse; font-size: .9rem; }
   th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #262230; }
   th { color: #9b95ab; font-weight: 600; }
@@ -9985,10 +10050,11 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
     <button id="tab-item" data-kind="item">Items</button>
     <input type="search" id="filter" placeholder="filter by name\u2026" />
     <span class="muted" id="count"></span>
+    <span class="warn" id="gridMsg"></span>
   </div>
   <table>
     <thead>
-      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th></tr>
+      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th><th id="aliasHead"></th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
@@ -10012,6 +10078,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
     function req(msg) { return commander.request(msg); }
 
     function setMsg(t) { $("launchMsg").textContent = t; }
+    function gridMsg(t) { $("gridMsg").textContent = t || ""; }
 
     // Launch buttons.
     Array.prototype.forEach.call(document.querySelectorAll(".launch"), function (b) {
@@ -10073,6 +10140,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
       body.innerHTML = "";
       $("count").textContent = rows.length + (total > rows.length ? " of " + total + " (filter to see more)" : "");
       $("distHead").textContent = kind === "actor" ? "Distance" : "";
+      $("aliasHead").textContent = kind === "actor" ? "Also known as" : "";
       rows.forEach(function (r) {
         var tr = document.createElement("tr");
 
@@ -10122,6 +10190,27 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
           distCell.appendChild(dist);
         }
         tr.appendChild(distCell);
+
+        // Aliases are spawn-side too \u2014 items are matched by their own name.
+        var aliasCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var al = document.createElement("input");
+          al.type = "text"; al.className = "alias";
+          al.value = (r.aliases || []).join(", ");
+          al.title = "other names chat can use, comma separated";
+          al.addEventListener("change", function () {
+            var list = al.value.split(",").map(function (s) { return s.trim(); })
+              .filter(function (s) { return s.length > 0; });
+            req({ type: "aliases", key: r.key, aliases: list }).then(function (res) {
+              // A rejected alias must not look accepted, so say why and let
+              // the reload put the saved value back in the box.
+              gridMsg(res && res.error ? res.error : "");
+              loadRows();
+            });
+          });
+          aliasCell.appendChild(al);
+        }
+        tr.appendChild(aliasCell);
 
         body.appendChild(tr);
       });
@@ -10543,6 +10632,17 @@ async function handleTabRequest(ctx, catalog, raw) {
       catalog.setOverride("actor", String(req.key), {
         distance
       });
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return {
+        ok: true
+      };
+    }
+    case "aliases": {
+      const list = Array.isArray(req.aliases) ? req.aliases.map(String) : [];
+      const result = catalog.setActorAliases(String(req.key), list);
+      if (!result.ok) return {
+        error: result.error
+      };
       ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
       return {
         ok: true

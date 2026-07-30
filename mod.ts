@@ -386,6 +386,15 @@ async function handleTabRequest(
       ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
       return { ok: true };
     }
+    case "aliases": {
+      // Actors only. A collision is reported rather than saved, so the tab can
+      // say why and show the value that actually stuck.
+      const list = Array.isArray(req.aliases) ? req.aliases.map(String) : [];
+      const result = catalog.setActorAliases(String(req.key), list);
+      if (!result.ok) return { error: result.error };
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return { ok: true };
+    }
     case "refresh-lookups": {
       const url = String(ctx.settings.get("lookups_url") || "").trim();
       if (!url) return { error: "set a Lookups refresh URL in settings first" };
