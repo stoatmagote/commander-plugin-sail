@@ -69,6 +69,8 @@ const DEFAULT_ITEM_PRICE = 50;
  * (a big boss landing 120 units away is already on top of you).
  */
 export const DEFAULT_ACTOR_DISTANCE = 120;
+/** Rows per page in the tab's grid (COM-66). */
+export const DEFAULT_PAGE_SIZE = 200;
 
 /** A grid row for the Sail tab. */
 export interface CatalogRow {
@@ -85,6 +87,36 @@ export interface CatalogRow {
   defaultDistance?: number;
   /** Actors only — other names this entry answers to. */
   aliases?: string[];
+}
+
+/** Which column the grid is ordered by (COM-65). */
+export type RowSort = "name" | "games" | "price" | "distance" | "enabled";
+
+/** How the grid narrows what it shows (COM-65). */
+export interface RowQuery {
+  /** Matches name, catalog key or any alias. */
+  filter?: string;
+  state?: "all" | "enabled" | "disabled";
+  /** "both" means the entry exists in both games, not "either". */
+  game?: "all" | "soh" | "2s2h" | "both";
+  /** Actors only; items have no kind. */
+  actorKind?: "all" | ActorKind;
+  sort?: RowSort;
+  desc?: boolean;
+  /** How many rows a page holds. */
+  limit?: number;
+  /** 1-based page of the filtered, sorted set (COM-66). */
+  page?: number;
+}
+
+/** One page of the grid, plus what the pager needs to describe itself. */
+export interface RowPage {
+  rows: CatalogRow[];
+  /** How many rows matched, before paging. */
+  total: number;
+  /** The page actually returned — clamped into range. */
+  page: number;
+  pages: number;
 }
 
 export class Catalog {
@@ -290,53 +322,120 @@ export class Catalog {
 
   // ---- grid ----
 
-  /** Rows for the tab, optionally filtered by a search term. Capped by limit. */
-  rows(kind: "actor" | "item", filter = "", limit = 200): CatalogRow[] {
-    const f = filter.trim().toLowerCase();
-    const out: CatalogRow[] = [];
-    if (kind === "actor") {
-      for (const e of this.#actors) {
-        const aliases = this.actorAliases(e);
-        // Searching an alias has to find the entry, or an alias you added is
-        // impossible to look up again by the word you added.
-        if (
-          f && !e.name.includes(f) && !e.key.toLowerCase().includes(f) &&
-          !aliases.some((a) => a.toLowerCase().includes(f))
-        ) {
-          continue;
-        }
-        out.push({
-          kind: "actor",
-          key: e.key,
-          name: e.name,
-          actorKind: e.kind,
-          games: this.actorGames(e),
-          price: this.actorPrice(e),
-          defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
-          enabled: this.actorEnabled(e),
-          distance: this.actorDistance(e),
-          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
-          aliases,
-        });
-        if (out.length >= limit) break;
-      }
-    } else {
-      for (const e of this.#items) {
-        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f)) {
-          continue;
-        }
-        out.push({
-          kind: "item",
-          key: e.key,
-          name: e.name,
-          games: this.itemGames(e),
-          price: this.itemPrice(e),
-          defaultPrice: DEFAULT_ITEM_PRICE,
-          enabled: this.itemEnabled(e),
-        });
-        if (out.length >= limit) break;
-      }
-    }
-    return out;
+  /** Every actor as a row, unfiltered. */
+  #actorRows(): CatalogRow[] {
+    return this.#actors.map((e) => ({
+      kind: "actor" as const,
+      key: e.key,
+      name: e.name,
+      actorKind: e.kind,
+      games: this.actorGames(e),
+      price: this.actorPrice(e),
+      defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
+      enabled: this.actorEnabled(e),
+      distance: this.actorDistance(e),
+      defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
+      aliases: this.actorAliases(e),
+    }));
   }
+
+  /** Every item as a row, unfiltered. */
+  #itemRows(): CatalogRow[] {
+    return this.#items.map((e) => ({
+      kind: "item" as const,
+      key: e.key,
+      name: e.name,
+      games: this.itemGames(e),
+      price: this.itemPrice(e),
+      defaultPrice: DEFAULT_ITEM_PRICE,
+      enabled: this.itemEnabled(e),
+    }));
+  }
+
+  /**
+   * Rows for the tab: filtered, sorted, then paged (COM-65, COM-66).
+   *
+   * All three happen here rather than in the tab's JavaScript so they apply to
+   * the whole catalog. Sorting only what the page already holds would reorder
+   * the visible rows and quietly leave the rest out of the ordering.
+   */
+  rows(
+    kind: "actor" | "item",
+    query: RowQuery = {},
+  ): RowPage {
+    const f = (query.filter ?? "").trim().toLowerCase();
+    const state = query.state ?? "all";
+    const game = query.game ?? "all";
+    const wantKind = query.actorKind ?? "all";
+
+    const matched = (kind === "actor" ? this.#actorRows() : this.#itemRows())
+      .filter((r) => {
+        if (f && !rowMatchesText(r, f)) return false;
+        if (state === "enabled" && !r.enabled) return false;
+        if (state === "disabled" && r.enabled) return false;
+        if (game === "both" && r.games.length < 2) return false;
+        if ((game === "soh" || game === "2s2h") && !r.games.includes(game)) {
+          return false;
+        }
+        // Items have no kind, so the filter simply doesn't apply to them.
+        if (
+          kind === "actor" && wantKind !== "all" && r.actorKind !== wantKind
+        ) {
+          return false;
+        }
+        return true;
+      });
+
+    if (query.sort) sortRows(matched, query.sort, query.desc === true);
+
+    // Clamp rather than trusting the caller: a filter that narrowed the set
+    // can leave the tab asking for a page that no longer exists, and an empty
+    // grid with no way back would look like everything vanished.
+    const size = Math.max(1, query.limit ?? DEFAULT_PAGE_SIZE);
+    const pages = Math.max(1, Math.ceil(matched.length / size));
+    const page = Math.min(Math.max(1, Math.floor(query.page ?? 1)), pages);
+    const start = (page - 1) * size;
+
+    return {
+      rows: matched.slice(start, start + size),
+      total: matched.length,
+      page,
+      pages,
+    };
+  }
+}
+
+/** Name, catalog key, or any alias — searching an alias must find the row. */
+function rowMatchesText(row: CatalogRow, needle: string): boolean {
+  if (row.name.toLowerCase().includes(needle)) return true;
+  if (row.key.toLowerCase().includes(needle)) return true;
+  return (row.aliases ?? []).some((a) => a.toLowerCase().includes(needle));
+}
+
+/** Sort in place. Ties break on name so the order is never arbitrary. */
+function sortRows(rows: CatalogRow[], sort: RowSort, desc: boolean): void {
+  const dir = desc ? -1 : 1;
+  rows.sort((a, b) => {
+    let d = 0;
+    switch (sort) {
+      case "name":
+        d = a.name.localeCompare(b.name);
+        break;
+      case "games":
+        // Fewest games first, then by which, so the single-game entries group.
+        d = a.games.length - b.games.length ||
+          a.games.join().localeCompare(b.games.join());
+        break;
+      case "price":
+        d = a.price - b.price;
+        break;
+      case "distance":
+        d = (a.distance ?? 0) - (b.distance ?? 0);
+        break;
+      case "enabled":
+        d = Number(a.enabled) - Number(b.enabled);
+        break;
+    }
+    return d !== 0 ? d * dir : a.name.localeCompare(b.name);
+  });
 }

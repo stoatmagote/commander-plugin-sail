@@ -9657,6 +9657,7 @@ var DEFAULT_ACTOR_PRICE = {
 };
 var DEFAULT_ITEM_PRICE = 50;
 var DEFAULT_ACTOR_DISTANCE = 120;
+var DEFAULT_PAGE_SIZE = 200;
 var Catalog = class {
   #actors;
   #items;
@@ -9835,51 +9836,101 @@ var Catalog = class {
     return games;
   }
   // ---- grid ----
-  /** Rows for the tab, optionally filtered by a search term. Capped by limit. */
-  rows(kind, filter = "", limit = 200) {
-    const f = filter.trim().toLowerCase();
-    const out = [];
-    if (kind === "actor") {
-      for (const e of this.#actors) {
-        const aliases = this.actorAliases(e);
-        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f) && !aliases.some((a) => a.toLowerCase().includes(f))) {
-          continue;
-        }
-        out.push({
-          kind: "actor",
-          key: e.key,
-          name: e.name,
-          actorKind: e.kind,
-          games: this.actorGames(e),
-          price: this.actorPrice(e),
-          defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
-          enabled: this.actorEnabled(e),
-          distance: this.actorDistance(e),
-          defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
-          aliases
-        });
-        if (out.length >= limit) break;
+  /** Every actor as a row, unfiltered. */
+  #actorRows() {
+    return this.#actors.map((e) => ({
+      kind: "actor",
+      key: e.key,
+      name: e.name,
+      actorKind: e.kind,
+      games: this.actorGames(e),
+      price: this.actorPrice(e),
+      defaultPrice: DEFAULT_ACTOR_PRICE[e.kind],
+      enabled: this.actorEnabled(e),
+      distance: this.actorDistance(e),
+      defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
+      aliases: this.actorAliases(e)
+    }));
+  }
+  /** Every item as a row, unfiltered. */
+  #itemRows() {
+    return this.#items.map((e) => ({
+      kind: "item",
+      key: e.key,
+      name: e.name,
+      games: this.itemGames(e),
+      price: this.itemPrice(e),
+      defaultPrice: DEFAULT_ITEM_PRICE,
+      enabled: this.itemEnabled(e)
+    }));
+  }
+  /**
+   * Rows for the tab: filtered, sorted, then paged (COM-65, COM-66).
+   *
+   * All three happen here rather than in the tab's JavaScript so they apply to
+   * the whole catalog. Sorting only what the page already holds would reorder
+   * the visible rows and quietly leave the rest out of the ordering.
+   */
+  rows(kind, query = {}) {
+    const f = (query.filter ?? "").trim().toLowerCase();
+    const state = query.state ?? "all";
+    const game = query.game ?? "all";
+    const wantKind = query.actorKind ?? "all";
+    const matched = (kind === "actor" ? this.#actorRows() : this.#itemRows()).filter((r) => {
+      if (f && !rowMatchesText(r, f)) return false;
+      if (state === "enabled" && !r.enabled) return false;
+      if (state === "disabled" && r.enabled) return false;
+      if (game === "both" && r.games.length < 2) return false;
+      if ((game === "soh" || game === "2s2h") && !r.games.includes(game)) {
+        return false;
       }
-    } else {
-      for (const e of this.#items) {
-        if (f && !e.name.includes(f) && !e.key.toLowerCase().includes(f)) {
-          continue;
-        }
-        out.push({
-          kind: "item",
-          key: e.key,
-          name: e.name,
-          games: this.itemGames(e),
-          price: this.itemPrice(e),
-          defaultPrice: DEFAULT_ITEM_PRICE,
-          enabled: this.itemEnabled(e)
-        });
-        if (out.length >= limit) break;
+      if (kind === "actor" && wantKind !== "all" && r.actorKind !== wantKind) {
+        return false;
       }
-    }
-    return out;
+      return true;
+    });
+    if (query.sort) sortRows(matched, query.sort, query.desc === true);
+    const size = Math.max(1, query.limit ?? DEFAULT_PAGE_SIZE);
+    const pages = Math.max(1, Math.ceil(matched.length / size));
+    const page = Math.min(Math.max(1, Math.floor(query.page ?? 1)), pages);
+    const start = (page - 1) * size;
+    return {
+      rows: matched.slice(start, start + size),
+      total: matched.length,
+      page,
+      pages
+    };
   }
 };
+function rowMatchesText(row, needle) {
+  if (row.name.toLowerCase().includes(needle)) return true;
+  if (row.key.toLowerCase().includes(needle)) return true;
+  return (row.aliases ?? []).some((a) => a.toLowerCase().includes(needle));
+}
+function sortRows(rows, sort, desc) {
+  const dir = desc ? -1 : 1;
+  rows.sort((a, b) => {
+    let d = 0;
+    switch (sort) {
+      case "name":
+        d = a.name.localeCompare(b.name);
+        break;
+      case "games":
+        d = a.games.length - b.games.length || a.games.join().localeCompare(b.games.join());
+        break;
+      case "price":
+        d = a.price - b.price;
+        break;
+      case "distance":
+        d = (a.distance ?? 0) - (b.distance ?? 0);
+        break;
+      case "enabled":
+        d = Number(a.enabled) - Number(b.enabled);
+        break;
+    }
+    return d !== 0 ? d * dir : a.name.localeCompare(b.name);
+  });
+}
 
 // src/launcher.ts
 function psPath(p) {
@@ -10013,6 +10064,10 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
   input.price { width: 4.5rem; text-align: right; }
   input.alias { width: 12rem; }
   .warn { color: #e39b8a; font-size: .82rem; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: #e8e5f0; }
+  th.sorted { color: #9b6bff; }
+  select:disabled { opacity: .45; }
   table { width: 100%; border-collapse: collapse; font-size: .9rem; }
   th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #262230; }
   th { color: #9b95ab; font-weight: 600; }
@@ -10048,16 +10103,45 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
   <div class="bar">
     <button id="tab-actor" class="sel" data-kind="actor">Actors</button>
     <button id="tab-item" data-kind="item">Items</button>
-    <input type="search" id="filter" placeholder="filter by name\u2026" />
+    <input type="search" id="filter" placeholder="filter by name or alias\u2026" />
+    <select id="fState">
+      <option value="all">any state</option>
+      <option value="enabled">enabled</option>
+      <option value="disabled">disabled</option>
+    </select>
+    <select id="fGame">
+      <option value="all">any game</option>
+      <option value="soh">SoH</option>
+      <option value="2s2h">2S2H</option>
+      <option value="both">both games</option>
+    </select>
+    <select id="fKind">
+      <option value="all">any kind</option>
+      <option value="boss">bosses</option>
+      <option value="enemy">enemies</option>
+      <option value="actor">non-enemies</option>
+    </select>
     <span class="muted" id="count"></span>
     <span class="warn" id="gridMsg"></span>
   </div>
   <table>
     <thead>
-      <tr><th>On</th><th>Name</th><th>Games</th><th>Price</th><th id="distHead"></th><th id="aliasHead"></th></tr>
+      <tr>
+        <th class="sortable" data-sort="enabled">On</th>
+        <th class="sortable" data-sort="name">Name</th>
+        <th class="sortable" data-sort="games">Games</th>
+        <th class="sortable" data-sort="price">Price</th>
+        <th class="sortable" id="distHead" data-sort="distance"></th>
+        <th id="aliasHead"></th>
+      </tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
+  <div class="bar">
+    <button id="pagePrev">\u2039 prev</button>
+    <span class="muted" id="pageAt"></span>
+    <button id="pageNext">next \u203A</button>
+  </div>
 
   <div class="cap">Recent hooks</div>
   <div id="log"></div>
@@ -10135,12 +10219,26 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
       });
     }
 
-    function renderRows(rows, total) {
+    function renderRows(res) {
+      var rows = res.rows || [];
+      var total = res.total || 0;
       var body = $("rows");
       body.innerHTML = "";
-      $("count").textContent = rows.length + (total > rows.length ? " of " + total + " (filter to see more)" : "");
+
+      // Which slice of the matching set this is, in the terms you'd ask the
+      // question: "showing 201-400 of 812".
+      var first = total === 0 ? 0 : (res.page - 1) * PAGE_SIZE + 1;
+      var last = first + rows.length - 1;
+      $("count").textContent = total === 0
+        ? "nothing matches"
+        : "showing " + first + "-" + last + " of " + total;
+      $("pageAt").textContent = res.pages > 1 ? "page " + res.page + " / " + res.pages : "";
+      $("pagePrev").disabled = res.page <= 1;
+      $("pageNext").disabled = res.page >= res.pages;
       $("distHead").textContent = kind === "actor" ? "Distance" : "";
       $("aliasHead").textContent = kind === "actor" ? "Also known as" : "";
+      // Setting the header text above drops the caret, so re-mark after.
+      markSort();
       rows.forEach(function (r) {
         var tr = document.createElement("tr");
 
@@ -10217,21 +10315,86 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
     }
 
     var filterTimer = null;
+    var sortBy = "";     // "" = catalog order
+    var sortDesc = false;
+    var page = 1;
+    var PAGE_SIZE = 200; // must match the plugin's DEFAULT_PAGE_SIZE
+
     function loadRows() {
-      req({ type: "rows", kind: kind, filter: $("filter").value }).then(function (res) {
-        if (res) renderRows(res.rows || [], res.total || 0);
+      req({
+        type: "rows",
+        kind: kind,
+        filter: $("filter").value,
+        state: $("fState").value,
+        game: $("fGame").value,
+        actorKind: $("fKind").value,
+        sort: sortBy,
+        desc: sortDesc,
+        page: page
+      }).then(function (res) {
+        if (!res) return;
+        // The catalog clamps the page into range, so adopt what it actually
+        // returned rather than what we asked for.
+        page = res.page || 1;
+        renderRows(res);
       });
     }
+    // Narrowing the set can leave the current page past the end, so any change
+    // to what's being shown starts again from the first page. Editing a row
+    // doesn't \u2014 that would throw you back to the top mid-pass.
+    function reload() { page = 1; loadRows(); }
+
     $("filter").addEventListener("input", function () {
       clearTimeout(filterTimer);
-      filterTimer = setTimeout(loadRows, 150);
+      filterTimer = setTimeout(reload, 150);
     });
+    ["fState", "fGame", "fKind"].forEach(function (id) {
+      $(id).addEventListener("change", reload);
+    });
+    $("pagePrev").addEventListener("click", function () {
+      if (page > 1) { page--; loadRows(); }
+    });
+    $("pageNext").addEventListener("click", function () {
+      page++; loadRows();
+    });
+
+    // Click a header to sort by it; click again to reverse.
+    function markSort() {
+      var ths = document.querySelectorAll("th.sortable");
+      for (var i = 0; i < ths.length; i++) {
+        var col = ths[i].getAttribute("data-sort");
+        ths[i].className = "sortable" + (col === sortBy ? " sorted" : "");
+        var caret = ths[i].querySelector(".caret");
+        if (caret) caret.parentNode.removeChild(caret);
+        if (col === sortBy) {
+          var c = document.createElement("span");
+          c.className = "caret";
+          c.textContent = sortDesc ? " \u25BE" : " \u25B4";
+          ths[i].appendChild(c);
+        }
+      }
+    }
+    var heads = document.querySelectorAll("th.sortable");
+    for (var i = 0; i < heads.length; i++) {
+      heads[i].addEventListener("click", function () {
+        var col = this.getAttribute("data-sort");
+        // The distance header is blank (and meaningless) for items.
+        if (col === "distance" && kind !== "actor") return;
+        if (sortBy === col) sortDesc = !sortDesc;
+        else { sortBy = col; sortDesc = false; }
+        markSort();
+        reload();
+      });
+    }
 
     function selectKind(k) {
       kind = k;
       $("tab-actor").className = k === "actor" ? "sel" : "";
       $("tab-item").className = k === "item" ? "sel" : "";
-      loadRows();
+      // Items have no kind, so that filter would silently narrow nothing.
+      $("fKind").disabled = k !== "actor";
+      if (k !== "actor" && sortBy === "distance") { sortBy = ""; markSort(); }
+      reload();
     }
     $("tab-actor").addEventListener("click", function () { selectKind("actor"); });
     $("tab-item").addEventListener("click", function () { selectKind("item"); });
@@ -10276,6 +10439,9 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
 // mod.ts
 var LOOKUP_CACHE_KEY = "lookups_cache";
 var OVERRIDES_KEY = "catalog_overrides";
+function pick(raw, allowed, fallback) {
+  return typeof raw === "string" && allowed.includes(raw) ? raw : fallback;
+}
 var EXE_KEY = {
   soh: "soh_exe",
   "2s2h": "s2h_exe"
@@ -10598,12 +10764,38 @@ async function handleTabRequest(ctx, catalog, raw) {
     }
     case "rows": {
       const kind = req.kind === "item" ? "item" : "actor";
-      const filter = typeof req.filter === "string" ? req.filter : "";
-      const rows = catalog.rows(kind, filter);
-      const total = kind === "actor" ? catalog.actorCount : catalog.itemCount;
+      const page = catalog.rows(kind, {
+        page: Number(req.page) > 0 ? Number(req.page) : 1,
+        filter: typeof req.filter === "string" ? req.filter : "",
+        state: pick(req.state, [
+          "all",
+          "enabled",
+          "disabled"
+        ], "all"),
+        game: pick(req.game, [
+          "all",
+          "soh",
+          "2s2h",
+          "both"
+        ], "all"),
+        actorKind: pick(req.actorKind, [
+          "all",
+          "boss",
+          "enemy",
+          "actor"
+        ], "all"),
+        sort: pick(req.sort, [
+          "name",
+          "games",
+          "price",
+          "distance",
+          "enabled"
+        ], void 0),
+        desc: req.desc === true
+      });
       return {
-        rows,
-        total
+        ...page,
+        catalogTotal: kind === "actor" ? catalog.actorCount : catalog.itemCount
       };
     }
     case "toggle": {

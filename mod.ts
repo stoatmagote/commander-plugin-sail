@@ -30,6 +30,20 @@ import { TAB_HTML } from "./src/tab.ts";
 
 const LOOKUP_CACHE_KEY = "lookups_cache";
 const OVERRIDES_KEY = "catalog_overrides";
+
+/**
+ * Read one of a fixed set of values off an untrusted tab message, falling back
+ * when it isn't one of them — the UI bridge carries whatever the iframe sent.
+ */
+function pick<T extends string, F extends T | undefined>(
+  raw: unknown,
+  allowed: readonly T[],
+  fallback: F,
+): T | F {
+  return typeof raw === "string" && (allowed as readonly string[]).includes(raw)
+    ? raw as T
+    : fallback;
+}
 // Executable paths live in storage (managed from the tab's Browse button, since
 // a plugin can't write its own settings).
 const EXE_KEY: Record<SailGame, string> = { soh: "soh_exe", "2s2h": "s2h_exe" };
@@ -354,10 +368,29 @@ async function handleTabRequest(
     }
     case "rows": {
       const kind = req.kind === "item" ? "item" : "actor";
-      const filter = typeof req.filter === "string" ? req.filter : "";
-      const rows = catalog.rows(kind, filter);
-      const total = kind === "actor" ? catalog.actorCount : catalog.itemCount;
-      return { rows, total };
+      // `total` is how many *match*, not how many exist — that's what the
+      // count and the page arithmetic need.
+      const page = catalog.rows(kind, {
+        page: Number(req.page) > 0 ? Number(req.page) : 1,
+        filter: typeof req.filter === "string" ? req.filter : "",
+        state: pick(req.state, ["all", "enabled", "disabled"] as const, "all"),
+        game: pick(req.game, ["all", "soh", "2s2h", "both"] as const, "all"),
+        actorKind: pick(
+          req.actorKind,
+          ["all", "boss", "enemy", "actor"] as const,
+          "all",
+        ),
+        sort: pick(
+          req.sort,
+          ["name", "games", "price", "distance", "enabled"] as const,
+          undefined,
+        ),
+        desc: req.desc === true,
+      });
+      return {
+        ...page,
+        catalogTotal: kind === "actor" ? catalog.actorCount : catalog.itemCount,
+      };
     }
     case "toggle": {
       const kind = req.entryKind === "item" ? "item" : "actor";

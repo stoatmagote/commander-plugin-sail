@@ -167,8 +167,8 @@ Deno.test("options publish aliases, and the grid finds an entry by one", () => {
   assertEquals(cucco?.label, "cucco", "the label stays canonical for chat");
 
   // Searching the alias has to find it, or you can't look up what you added.
-  const found = c.rows("actor", "chicken");
-  assertEquals(found.map((r) => r.name), ["cucco"]);
+  const found = c.rows("actor", { filter: "chicken" });
+  assertEquals(found.rows.map((r) => r.name), ["cucco"]);
 });
 
 Deno.test("everything is enabled by default", () => {
@@ -218,14 +218,120 @@ Deno.test("items resolve, know their games, and are given by name", () => {
 
 Deno.test("rows() filters by name and reports enable/price/games", () => {
   const c = new Catalog(DATA);
-  const rows = c.rows("actor", "cucco");
+  const { rows, total } = c.rows("actor", { filter: "cucco" });
   assertEquals(rows.length, 1);
+  assertEquals(total, 1, "total counts matches, not the whole catalog");
   assertEquals(rows[0].name, "cucco");
   assertEquals(rows[0].games, ["soh", "2s2h"]);
   assertEquals(rows[0].enabled, true);
 
-  const items = c.rows("item", "");
-  assertEquals(items.length, 2);
+  assertEquals(c.rows("item", {}).rows.length, 2);
+});
+
+// ---- grid filters and sorting (COM-65) ----
+
+Deno.test("rows() filters by state, game and actor kind, and combines them", () => {
+  const c = new Catalog(DATA);
+  const names = (q: Parameters<typeof c.rows>[1]) =>
+    c.rows("actor", q).rows.map((r) => r.name);
+
+  c.setOverride("actor", "ACTOR_EN_TEST", { enabled: false });
+  assertEquals(names({ state: "disabled" }), ["test"]);
+  assertEquals(names({ state: "enabled" }), ["cucco", "dodongo"]);
+
+  // "both" means present in both games, not "either".
+  assertEquals(names({ game: "both" }), ["cucco"]);
+  assertEquals(names({ game: "soh" }), ["cucco", "dodongo"]);
+  assertEquals(names({ game: "2s2h" }), ["cucco", "test"]);
+
+  assertEquals(names({ actorKind: "boss" }), ["dodongo"]);
+  assertEquals(names({ actorKind: "enemy" }), ["test"]);
+  assertEquals(names({ actorKind: "actor" }), ["cucco"], "non-enemies");
+
+  // Combined: a disabled enemy that exists in 2S2H.
+  assertEquals(
+    names({ state: "disabled", game: "2s2h", actorKind: "enemy" }),
+    ["test"],
+  );
+  assertEquals(names({ state: "enabled", actorKind: "enemy" }), []);
+});
+
+// ---- pagination (COM-66) ----
+
+Deno.test("rows() pages through the matching set", () => {
+  // 450 actors, so the third page is a partial one.
+  const many: CatalogData = {
+    actors: Array.from({ length: 450 }, (_, i) => ({
+      key: `A_${String(i).padStart(3, "0")}`,
+      name: `actor ${String(i).padStart(3, "0")}`,
+      kind: "actor" as const,
+      soh: i,
+    })),
+    items: [],
+  };
+  const c = new Catalog(many);
+  const q = { sort: "name" as const };
+
+  const first = c.rows("actor", q);
+  assertEquals(first.page, 1);
+  assertEquals(first.pages, 3);
+  assertEquals(first.total, 450);
+  assertEquals(first.rows.length, 200);
+  assertEquals(first.rows[0].name, "actor 000");
+
+  // The whole point: entries 201-400 are reachable.
+  const second = c.rows("actor", { ...q, page: 2 });
+  assertEquals(second.rows[0].name, "actor 200");
+  assertEquals(second.rows[199].name, "actor 399");
+
+  const third = c.rows("actor", { ...q, page: 3 });
+  assertEquals(third.rows.length, 50, "last page is partial");
+  assertEquals(third.rows[49].name, "actor 449");
+});
+
+Deno.test("a page past the end clamps instead of showing nothing", () => {
+  const c = new Catalog(DATA);
+  // A filter can shrink the set under whatever page you were on; an empty grid
+  // with no way back would look like everything vanished.
+  const past = c.rows("actor", { page: 99 });
+  assertEquals(past.page, 1);
+  assertEquals(past.pages, 1);
+  assertEquals(past.rows.length, 3);
+
+  // No matches is still a valid, navigable page 1 of 1.
+  const none = c.rows("actor", { filter: "zzzzzz" });
+  assertEquals(none.total, 0);
+  assertEquals(none.page, 1);
+  assertEquals(none.pages, 1);
+  assertEquals(none.rows, []);
+});
+
+Deno.test("rows() sorts the whole matching set, not just the visible page", () => {
+  const c = new Catalog(DATA);
+  const names = (q: Parameters<typeof c.rows>[1]) =>
+    c.rows("actor", q).rows.map((r) => r.name);
+
+  assertEquals(names({ sort: "name" }), ["cucco", "dodongo", "test"]);
+  assertEquals(names({ sort: "name", desc: true }), [
+    "test",
+    "dodongo",
+    "cucco",
+  ]);
+  // Default prices: actor 50, enemy 100, boss 300.
+  assertEquals(names({ sort: "price" }), ["cucco", "test", "dodongo"]);
+  assertEquals(names({ sort: "price", desc: true }), [
+    "dodongo",
+    "test",
+    "cucco",
+  ]);
+  // Single-game entries group before the two-game one.
+  assertEquals(names({ sort: "games" })[2], "cucco");
+
+  // Sorting happens before the cap, so the top of the order is the real top
+  // rather than whatever the first page happened to hold.
+  const capped = c.rows("actor", { sort: "price", desc: true, limit: 1 });
+  assertEquals(capped.rows.map((r) => r.name), ["dodongo"]);
+  assertEquals(capped.total, 3, "total still counts everything that matched");
 });
 
 // ---- option lists (COM-59) ----
