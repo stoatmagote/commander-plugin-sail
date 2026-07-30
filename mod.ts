@@ -428,6 +428,19 @@ async function handleTabRequest(
       ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
       return { ok: true };
     }
+    case "meta": {
+      // Actors only, and validated in the catalog: a bad key or a reserved one
+      // is reported so the tab can say why rather than saving something the
+      // template can't address.
+      const raw = req.meta;
+      const meta = (raw && typeof raw === "object" && !Array.isArray(raw))
+        ? raw as Record<string, unknown>
+        : {};
+      const result = catalog.setActorMeta(String(req.key), meta);
+      if (!result.ok) return { error: result.error };
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return { ok: true };
+    }
     case "refresh-lookups": {
       const url = String(ctx.settings.get("lookups_url") || "").trim();
       if (!url) return { error: "set a Lookups refresh URL in settings first" };

@@ -9658,6 +9658,10 @@ var DEFAULT_ACTOR_PRICE = {
 var DEFAULT_ITEM_PRICE = 50;
 var DEFAULT_ACTOR_DISTANCE = 120;
 var DEFAULT_PAGE_SIZE = 200;
+var META_KEY_RE = /^[A-Za-z0-9_]+$/;
+var RESERVED_META = /* @__PURE__ */ new Set([
+  "distance"
+]);
 var Catalog = class {
   #actors;
   #items;
@@ -9690,6 +9694,7 @@ var Catalog = class {
     if (merged.price === void 0) delete merged.price;
     if (merged.distance === void 0) delete merged.distance;
     if (merged.aliases === void 0) delete merged.aliases;
+    if (merged.meta === void 0) delete merged.meta;
     this.#overrides = {
       ...this.#overrides,
       [id]: merged
@@ -9729,7 +9734,10 @@ var Catalog = class {
         value: e.key,
         label: e.name,
         cost: this.actorPrice(e),
+        // distance last: it's the typed, validated one, so it wins even if
+        // an extra somehow carries that name.
         meta: {
+          ...this.actorMeta(e),
           distance: String(this.actorDistance(e))
         }
       };
@@ -9751,6 +9759,52 @@ var Catalog = class {
   /** The names this actor also answers to (COM-64). */
   actorAliases(e) {
     return this.#ov("actor", e.key).aliases ?? e.aliases ?? [];
+  }
+  /** This actor's extras, without the distance the column owns (COM-67). */
+  actorMeta(e) {
+    return this.#ov("actor", e.key).meta ?? e.meta ?? {};
+  }
+  /**
+   * Set an actor's extras. `distance` is reserved — it has its own column, a
+   * default and numeric validation, and the shipped !spawn depends on it, so
+   * an extra by that name would silently fight the typed value.
+   */
+  setActorMeta(key, meta) {
+    const self = this.actorByKey(key);
+    if (!self) return {
+      ok: false,
+      error: `no actor called "${key}"`
+    };
+    const cleaned = {};
+    for (const [rawKey, rawValue] of Object.entries(meta ?? {})) {
+      const name = rawKey.trim();
+      if (!META_KEY_RE.test(name)) {
+        return {
+          ok: false,
+          error: `"${name}" isn't a usable name \u2014 letters, digits and underscore only`
+        };
+      }
+      if (RESERVED_META.has(name)) {
+        return {
+          ok: false,
+          error: `"${name}" has its own column \u2014 set it there`
+        };
+      }
+      const value = String(rawValue ?? "").trim();
+      if (!value) return {
+        ok: false,
+        error: `"${name}" needs a value`
+      };
+      cleaned[name] = value;
+    }
+    const bundled = Object.keys(self.meta ?? {}).length > 0;
+    const any = Object.keys(cleaned).length > 0;
+    this.setOverride("actor", self.key, {
+      meta: any || bundled ? cleaned : void 0
+    });
+    return {
+      ok: true
+    };
   }
   /**
    * Set an actor's aliases, refusing any that already name something else.
@@ -9849,7 +9903,8 @@ var Catalog = class {
       enabled: this.actorEnabled(e),
       distance: this.actorDistance(e),
       defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
-      aliases: this.actorAliases(e)
+      aliases: this.actorAliases(e),
+      meta: this.actorMeta(e)
     }));
   }
   /** Every item as a row, unfiltered. */
@@ -10133,6 +10188,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
         <th class="sortable" data-sort="price">Price</th>
         <th class="sortable" id="distHead" data-sort="distance"></th>
         <th id="aliasHead"></th>
+        <th id="metaHead"></th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -10237,6 +10293,7 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
       $("pageNext").disabled = res.page >= res.pages;
       $("distHead").textContent = kind === "actor" ? "Distance" : "";
       $("aliasHead").textContent = kind === "actor" ? "Also known as" : "";
+      $("metaHead").textContent = kind === "actor" ? "Extras" : "";
       // Setting the header text above drops the caret, so re-mark after.
       markSort();
       rows.forEach(function (r) {
@@ -10309,6 +10366,34 @@ var TAB_HTML = String.raw(_a || (_a = __template([`
           aliasCell.appendChild(al);
         }
         tr.appendChild(aliasCell);
+
+        // Free-form extras a step can template as {arg.actor.meta.<key>}.
+        var metaCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var mx = document.createElement("input");
+          mx.type = "text"; mx.className = "alias";
+          mx.value = Object.keys(r.meta || {}).map(function (k) {
+            return k + "=" + r.meta[k];
+          }).join(", ");
+          mx.title = "extras for command steps: key=value, comma separated \u2014 read as {arg.actor.meta.key}";
+          mx.addEventListener("change", function () {
+            var obj = {}, bad = "";
+            mx.value.split(",").forEach(function (pair) {
+              if (!pair.trim()) return;
+              var eq = pair.indexOf("=");
+              // Split on the first = so a value may contain one.
+              if (eq < 0) { bad = bad || ('"' + pair.trim() + '" needs key=value'); return; }
+              obj[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+            });
+            if (bad) { gridMsg(bad); loadRows(); return; }
+            req({ type: "meta", key: r.key, meta: obj }).then(function (res) {
+              gridMsg(res && res.error ? res.error : "");
+              loadRows();
+            });
+          });
+          metaCell.appendChild(mx);
+        }
+        tr.appendChild(metaCell);
 
         body.appendChild(tr);
       });
@@ -10832,6 +10917,18 @@ async function handleTabRequest(ctx, catalog, raw) {
     case "aliases": {
       const list = Array.isArray(req.aliases) ? req.aliases.map(String) : [];
       const result = catalog.setActorAliases(String(req.key), list);
+      if (!result.ok) return {
+        error: result.error
+      };
+      ctx.storage.set(OVERRIDES_KEY, catalog.overrides());
+      return {
+        ok: true
+      };
+    }
+    case "meta": {
+      const raw2 = req.meta;
+      const meta = raw2 && typeof raw2 === "object" && !Array.isArray(raw2) ? raw2 : {};
+      const result = catalog.setActorMeta(String(req.key), meta);
       if (!result.ok) return {
         error: result.error
       };

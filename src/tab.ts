@@ -94,6 +94,7 @@ export const TAB_HTML: string = String.raw`
         <th class="sortable" data-sort="price">Price</th>
         <th class="sortable" id="distHead" data-sort="distance"></th>
         <th id="aliasHead"></th>
+        <th id="metaHead"></th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -198,6 +199,7 @@ export const TAB_HTML: string = String.raw`
       $("pageNext").disabled = res.page >= res.pages;
       $("distHead").textContent = kind === "actor" ? "Distance" : "";
       $("aliasHead").textContent = kind === "actor" ? "Also known as" : "";
+      $("metaHead").textContent = kind === "actor" ? "Extras" : "";
       // Setting the header text above drops the caret, so re-mark after.
       markSort();
       rows.forEach(function (r) {
@@ -270,6 +272,34 @@ export const TAB_HTML: string = String.raw`
           aliasCell.appendChild(al);
         }
         tr.appendChild(aliasCell);
+
+        // Free-form extras a step can template as {arg.actor.meta.<key>}.
+        var metaCell = document.createElement("td");
+        if (r.kind === "actor") {
+          var mx = document.createElement("input");
+          mx.type = "text"; mx.className = "alias";
+          mx.value = Object.keys(r.meta || {}).map(function (k) {
+            return k + "=" + r.meta[k];
+          }).join(", ");
+          mx.title = "extras for command steps: key=value, comma separated — read as {arg.actor.meta.key}";
+          mx.addEventListener("change", function () {
+            var obj = {}, bad = "";
+            mx.value.split(",").forEach(function (pair) {
+              if (!pair.trim()) return;
+              var eq = pair.indexOf("=");
+              // Split on the first = so a value may contain one.
+              if (eq < 0) { bad = bad || ('"' + pair.trim() + '" needs key=value'); return; }
+              obj[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+            });
+            if (bad) { gridMsg(bad); loadRows(); return; }
+            req({ type: "meta", key: r.key, meta: obj }).then(function (res) {
+              gridMsg(res && res.error ? res.error : "");
+              loadRows();
+            });
+          });
+          metaCell.appendChild(mx);
+        }
+        tr.appendChild(metaCell);
 
         body.appendChild(tr);
       });

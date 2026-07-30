@@ -228,6 +228,74 @@ Deno.test("rows() filters by name and reports enable/price/games", () => {
   assertEquals(c.rows("item", {}).rows.length, 2);
 });
 
+// ---- per-actor extras (COM-67) ----
+
+Deno.test("extras ride alongside distance, and distance stays authoritative", () => {
+  const c = new Catalog({
+    actors: [
+      {
+        key: "A_NIW",
+        name: "cucco",
+        kind: "actor",
+        soh: 25,
+        meta: { sound: "cluck" },
+      },
+    ],
+    items: [],
+  });
+  const niw = c.actorByKey("A_NIW")!;
+  assertEquals(c.actorMeta(niw), { sound: "cluck" });
+
+  // Published together, so a step can template either.
+  const option = c.actorOptions()[0];
+  assertEquals(option.meta, { sound: "cluck", distance: "120" });
+
+  assertEquals(c.setActorMeta("A_NIW", { angry: "1" }), { ok: true });
+  assertEquals(c.actorOptions()[0].meta, { angry: "1", distance: "120" });
+
+  // The typed distance still wins, and the column still drives it.
+  c.setOverride("actor", "A_NIW", { distance: 400 });
+  assertEquals(c.actorOptions()[0].meta?.distance, "400");
+});
+
+Deno.test("extras are refused when the template couldn't address them", () => {
+  const c = new Catalog(DATA);
+  const key = "ACTOR_EN_NIW";
+
+  const dotted = c.setActorMeta(key, { "a.b": "x" });
+  assert(!dotted.ok);
+  if (!dotted.ok) assert(dotted.error.includes("letters, digits"));
+
+  // distance has its own column; an extra by that name would fight it.
+  const reserved = c.setActorMeta(key, { distance: "400" });
+  assert(!reserved.ok);
+  if (!reserved.ok) assert(reserved.error.includes("own column"));
+
+  // Silently dropping this would look like the edit saved and vanished.
+  const blank = c.setActorMeta(key, { sound: "  " });
+  assert(!blank.ok);
+  if (!blank.ok) assert(blank.error.includes("needs a value"));
+
+  assertEquals(c.actorMeta(c.actorByKey(key)!), {}, "nothing was saved");
+});
+
+Deno.test("clearing extras removes a bundled one rather than restoring it", () => {
+  const c = new Catalog({
+    actors: [
+      { key: "A", name: "a", kind: "actor", soh: 1, meta: { sound: "cluck" } },
+      { key: "B", name: "b", kind: "actor", soh: 2 },
+    ],
+    items: [],
+  });
+
+  assertEquals(c.setActorMeta("A", {}), { ok: true });
+  assertEquals(c.actorMeta(c.actorByKey("A")!), {}, "bundled one is gone");
+
+  // An entry that never had extras stores nothing rather than an empty map.
+  assertEquals(c.setActorMeta("B", {}), { ok: true });
+  assertEquals(c.overrides()["actor:B"], undefined);
+});
+
 // ---- grid filters and sorting (COM-65) ----
 
 Deno.test("rows() filters by state, game and actor kind, and combines them", () => {

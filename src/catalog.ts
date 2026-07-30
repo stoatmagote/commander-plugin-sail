@@ -28,6 +28,8 @@ export interface ActorEntry {
   distance?: number;
   /** Other things a viewer might type for it ("chicken" for a cucco). */
   aliases?: string[];
+  /** Extras the steps can template as `{arg.actor.meta.<key>}` (COM-67). */
+  meta?: Record<string, string>;
 }
 
 export interface ItemEntry {
@@ -53,6 +55,8 @@ export interface EntryOverride {
    * the streamer can remove a bundled alias they don't want.
    */
   aliases?: string[];
+  /** Actors only: extras, replacing the catalog's for the same reason. */
+  meta?: Record<string, string>;
 }
 /** key: `actor:<KEY>` or `item:<KEY>`. */
 export type Overrides = Record<string, EntryOverride>;
@@ -71,6 +75,10 @@ const DEFAULT_ITEM_PRICE = 50;
 export const DEFAULT_ACTOR_DISTANCE = 120;
 /** Rows per page in the tab's grid (COM-66). */
 export const DEFAULT_PAGE_SIZE = 200;
+/** What `{arg.actor.meta.<key>}` can address, so keys stay templatable. */
+const META_KEY_RE = /^[A-Za-z0-9_]+$/;
+/** Extras that already have a first-class home and mustn't be shadowed. */
+const RESERVED_META = new Set(["distance"]);
 
 /** A grid row for the Sail tab. */
 export interface CatalogRow {
@@ -87,6 +95,8 @@ export interface CatalogRow {
   defaultDistance?: number;
   /** Actors only — other names this entry answers to. */
   aliases?: string[];
+  /** Actors only — extras, without the distance the column owns. */
+  meta?: Record<string, string>;
 }
 
 /** Which column the grid is ordered by (COM-65). */
@@ -159,9 +169,10 @@ export class Catalog {
     if (merged.enabled === true) delete merged.enabled;
     if (merged.price === undefined) delete merged.price;
     if (merged.distance === undefined) delete merged.distance;
-    // An empty list is kept, unlike the other fields: it's how "this entry has
-    // no aliases" is told apart from "no opinion, use the catalog's".
+    // Empty aliases/meta are kept, unlike the other fields: that's how "this
+    // entry has none" is told apart from "no opinion, use the catalog's".
     if (merged.aliases === undefined) delete merged.aliases;
+    if (merged.meta === undefined) delete merged.meta;
     this.#overrides = { ...this.#overrides, [id]: merged };
     if (Object.keys(this.#overrides[id]).length === 0) {
       delete this.#overrides[id];
@@ -205,7 +216,12 @@ export class Catalog {
           value: e.key,
           label: e.name,
           cost: this.actorPrice(e),
-          meta: { distance: String(this.actorDistance(e)) },
+          // distance last: it's the typed, validated one, so it wins even if
+          // an extra somehow carries that name.
+          meta: {
+            ...this.actorMeta(e),
+            distance: String(this.actorDistance(e)),
+          },
         };
         // The engine matches on these too, and still reports `label` — so
         // `!spawn chicken` spawns a cucco and says "spawned a cucco".
@@ -229,6 +245,54 @@ export class Catalog {
   /** The names this actor also answers to (COM-64). */
   actorAliases(e: ActorEntry): string[] {
     return this.#ov("actor", e.key).aliases ?? e.aliases ?? [];
+  }
+  /** This actor's extras, without the distance the column owns (COM-67). */
+  actorMeta(e: ActorEntry): Record<string, string> {
+    return this.#ov("actor", e.key).meta ?? e.meta ?? {};
+  }
+
+  /**
+   * Set an actor's extras. `distance` is reserved — it has its own column, a
+   * default and numeric validation, and the shipped !spawn depends on it, so
+   * an extra by that name would silently fight the typed value.
+   */
+  setActorMeta(
+    key: string,
+    meta: Record<string, unknown>,
+  ): { ok: true } | { ok: false; error: string } {
+    const self = this.actorByKey(key);
+    if (!self) return { ok: false, error: `no actor called "${key}"` };
+
+    const cleaned: Record<string, string> = {};
+    for (const [rawKey, rawValue] of Object.entries(meta ?? {})) {
+      const name = rawKey.trim();
+      if (!META_KEY_RE.test(name)) {
+        return {
+          ok: false,
+          error:
+            `"${name}" isn't a usable name — letters, digits and underscore only`,
+        };
+      }
+      if (RESERVED_META.has(name)) {
+        return {
+          ok: false,
+          error: `"${name}" has its own column — set it there`,
+        };
+      }
+      const value = String(rawValue ?? "").trim();
+      // Dropping it silently would look like the edit saved and then vanished.
+      if (!value) return { ok: false, error: `"${name}" needs a value` };
+      cleaned[name] = value;
+    }
+
+    // Same reasoning as aliases: an empty map has to be stored when the
+    // catalog ships extras, or removing one is impossible.
+    const bundled = Object.keys(self.meta ?? {}).length > 0;
+    const any = Object.keys(cleaned).length > 0;
+    this.setOverride("actor", self.key, {
+      meta: any || bundled ? cleaned : undefined,
+    });
+    return { ok: true };
   }
 
   /**
@@ -336,6 +400,7 @@ export class Catalog {
       distance: this.actorDistance(e),
       defaultDistance: e.distance ?? DEFAULT_ACTOR_DISTANCE,
       aliases: this.actorAliases(e),
+      meta: this.actorMeta(e),
     }));
   }
 
