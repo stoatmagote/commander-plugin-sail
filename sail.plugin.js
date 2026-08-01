@@ -4790,7 +4790,8 @@ var BUNDLED_CATALOG = {
       "name": "enemy body parts",
       "kind": "actor",
       "s2h": 3,
-      "soh": 7
+      "soh": 7,
+      "requiresParent": true
     },
     {
       "key": "ACTOR_EN_FG",
@@ -5220,7 +5221,8 @@ var BUNDLED_CATALOG = {
       "key": "ACTOR_EN_HAKUROCK",
       "name": "goht debris",
       "kind": "actor",
-      "s2h": 490
+      "s2h": 490,
+      "requiresParent": true
     },
     {
       "key": "ACTOR_EN_SI",
@@ -5251,7 +5253,8 @@ var BUNDLED_CATALOG = {
       "key": "ACTOR_EN_MINIDEATH",
       "name": "gomess s bat",
       "kind": "enemy",
-      "s2h": 68
+      "s2h": 68,
+      "requiresParent": true
     },
     {
       "key": "ACTOR_OBJ_DORA",
@@ -6287,7 +6290,8 @@ var BUNDLED_CATALOG = {
       "key": "ACTOR_EN_MINISLIME",
       "name": "mini jelly droplet",
       "kind": "boss",
-      "s2h": 217
+      "s2h": 217,
+      "requiresParent": true
     },
     {
       "key": "ACTOR_BG_IKANA_MIRROR",
@@ -7182,7 +7186,8 @@ var BUNDLED_CATALOG = {
       "key": "ACTOR_EN_BIGPAMET",
       "name": "snapper",
       "kind": "boss",
-      "s2h": 324
+      "s2h": 324,
+      "requiresParent": true
     },
     {
       "key": "ACTOR_EN_KAME",
@@ -9729,7 +9734,7 @@ var Catalog = class {
    * break `!spawn` for every actor nobody had tuned yet.
    */
   actorOptions() {
-    return this.#actors.filter((e) => this.actorEnabled(e)).map((e) => {
+    return this.#actors.filter((e) => !e.requiresParent).filter((e) => this.actorEnabled(e)).map((e) => {
       const option = {
         value: e.key,
         label: e.name,

@@ -29,7 +29,33 @@ interface ActorCatalogEntry {
   kind: Kind;
   soh?: number;
   s2h?: number;
+  /** Only meaningful as another actor's child — never offered to chat. */
+  requiresParent?: true;
 }
+
+/**
+ * Actors that only ever exist as another actor's child.
+ *
+ * These are spawned with `Actor_SpawnAsChild` and read `actor.parent->…`, so a
+ * standalone spawn is either a crash or a no-op. The games are patched to fail
+ * safe (see the `[Sail]` guards in each overlay), but there is still nothing
+ * worth spawning — so keep them out of `!spawn` entirely rather than charging a
+ * viewer for an actor that removes itself. Every one of them has a spawnable
+ * parent that brings it along, named here so the reason survives.
+ *
+ * Verified by checking that each is a SpawnAsChild target in some *other*
+ * actor's file. Actors that spawn their own children (bomber jim, big poe) or
+ * that guard the deref another way (poe sister, via megCloneId) are fine
+ * standalone and deliberately absent.
+ */
+const REQUIRES_PARENT: Record<string, string> = {
+  ACTOR_EN_BIGPAMET: "gekko rides it — spawn gekko",
+  ACTOR_EN_MINIDEATH: "gomess's bat swarm — spawn gomess",
+  ACTOR_EN_MINISLIME:
+    "a piece of the fused jellies — spawn fused jellies gekko",
+  ACTOR_EN_HAKUROCK: "goht's falling debris — spawn goht",
+  ACTOR_EN_PART: "the body-part/gore helper, not an actor in its own right",
+};
 interface ItemCatalogEntry {
   key: string; // ITEM_* enum name
   name: string;
@@ -158,6 +184,11 @@ async function buildActorCatalog(): Promise<ActorCatalogEntry[]> {
   // 2S2H first — it carries the human display names.
   for (const e of s2h.entries) add("2s2h", e, s2h.cats.get(e.enumName));
   for (const e of soh.entries) add("soh", e, soh.cats.get(e.enumName));
+
+  for (const key of Object.keys(REQUIRES_PARENT)) {
+    const entry = byEnum.get(key);
+    if (entry) entry.requiresParent = true;
+  }
 
   // A 2S2H-named entry might have kept the SoH-only clean name; re-derive from
   // the 2S2H display when we have it (add() already used it first, so we're set).

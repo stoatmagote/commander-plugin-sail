@@ -3,6 +3,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { fuzzyResolve, normalize } from "../src/fuzzy.ts";
 import { Catalog, type CatalogData } from "../src/catalog.ts";
+import { BUNDLED_CATALOG } from "../src/catalog.data.ts";
 
 // ---- fuzzy ----
 
@@ -445,4 +446,50 @@ Deno.test("an actor can be found by the key an option hands over", () => {
   assertEquals(c.actorByKey("ACTOR_EN_NIW")?.name, "cucco");
   assertEquals(c.actorByKey("actor_en_niw")?.name, "cucco", "case-insensitive");
   assertEquals(c.actorByKey("nope"), undefined);
+});
+
+Deno.test("a child-only actor is never offered to chat", () => {
+  // COM-72: the Snapper is Gekko's mount and crashed 2S2H when spawned alone.
+  // The games are patched to fail safe now, but a lone one still does nothing,
+  // so it must not reach !spawn — a viewer would pay for an actor that removes
+  // itself. Deliberately NOT a per-entry toggle: spawning it is never right.
+  const c = new Catalog({
+    actors: [
+      { key: "A_NORMAL", name: "normal", kind: "enemy", soh: 1 },
+      {
+        key: "A_CHILD",
+        name: "child only",
+        kind: "boss",
+        soh: 2,
+        requiresParent: true,
+      },
+    ],
+    items: [],
+  });
+
+  assertEquals(c.actorOptions().map((o) => o.value), ["A_NORMAL"]);
+  // Still resolvable and still in the grid — the streamer can see why it's
+  // absent rather than the entry silently vanishing from the catalog.
+  assertEquals(c.actorByKey("A_CHILD")?.name, "child only");
+});
+
+Deno.test("the real catalog keeps the known child-only actors out", () => {
+  const c = new Catalog(BUNDLED_CATALOG);
+  const offered = new Set(c.actorOptions().map((o) => o.value));
+  for (
+    const key of [
+      "ACTOR_EN_BIGPAMET", // snapper — crashed 2S2H live
+      "ACTOR_EN_MINIDEATH",
+      "ACTOR_EN_MINISLIME",
+      "ACTOR_EN_HAKUROCK",
+      "ACTOR_EN_PART",
+    ]
+  ) {
+    assertEquals(offered.has(key), false, `${key} must not be offered`);
+  }
+  // Their spawnable parents must still be there, or the fix removed the fun.
+  for (const name of ["gekko", "fused jellies gekko"]) {
+    const r = c.resolveActor(name);
+    assertEquals(r.kind, "match", `${name} should still be spawnable`);
+  }
 });

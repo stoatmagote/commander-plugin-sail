@@ -30,6 +30,13 @@ export interface ActorEntry {
   aliases?: string[];
   /** Extras the steps can template as `{arg.actor.meta.<key>}` (COM-67). */
   meta?: Record<string, string>;
+  /**
+   * Only meaningful as another actor's child (COM-72). Spawned alone it reads
+   * a null `actor.parent`; the games are patched to fail safe rather than
+   * crash, but it still does nothing, so it is never offered to chat. Its
+   * parent is spawnable and brings it along.
+   */
+  requiresParent?: boolean;
 }
 
 export interface ItemEntry {
@@ -210,6 +217,10 @@ export class Catalog {
    */
   actorOptions(): ChoiceOption[] {
     return this.#actors
+      // Never offer a child-only actor: alone it does nothing, and a viewer
+      // would be charged for it. Not a per-entry toggle the streamer can undo
+      // by accident — spawning it is never the right answer.
+      .filter((e) => !e.requiresParent)
       .filter((e) => this.actorEnabled(e))
       .map((e) => {
         const option: ChoiceOption = {

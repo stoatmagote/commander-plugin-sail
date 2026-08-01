@@ -3,7 +3,7 @@
 
 import type { CatalogData } from "./catalog.ts";
 
-export const CATALOG_GENERATED_AT = "2026-07-24T00:46:57.786Z";
+export const CATALOG_GENERATED_AT = "2026-08-01T03:57:35.231Z";
 
 export const BUNDLED_CATALOG: CatalogData = {
   "actors": [
@@ -1915,6 +1915,7 @@ export const BUNDLED_CATALOG: CatalogData = {
       "kind": "actor",
       "s2h": 3,
       "soh": 7,
+      "requiresParent": true,
     },
     {
       "key": "ACTOR_EN_FG",
@@ -2345,6 +2346,7 @@ export const BUNDLED_CATALOG: CatalogData = {
       "name": "goht debris",
       "kind": "actor",
       "s2h": 490,
+      "requiresParent": true,
     },
     {
       "key": "ACTOR_EN_SI",
@@ -2376,6 +2378,7 @@ export const BUNDLED_CATALOG: CatalogData = {
       "name": "gomess s bat",
       "kind": "enemy",
       "s2h": 68,
+      "requiresParent": true,
     },
     {
       "key": "ACTOR_OBJ_DORA",
@@ -3412,6 +3415,7 @@ export const BUNDLED_CATALOG: CatalogData = {
       "name": "mini jelly droplet",
       "kind": "boss",
       "s2h": 217,
+      "requiresParent": true,
     },
     {
       "key": "ACTOR_BG_IKANA_MIRROR",
@@ -4307,6 +4311,7 @@ export const BUNDLED_CATALOG: CatalogData = {
       "name": "snapper",
       "kind": "boss",
       "s2h": 324,
+      "requiresParent": true,
     },
     {
       "key": "ACTOR_EN_KAME",

@@ -10,8 +10,8 @@
     "fmt": "deno fmt",
     "lint": "deno lint",
     "bundle": "deno bundle mod.ts -o sail.plugin.js",
-    "extract-lookups": "deno run -A scripts/extract_lookups.ts",
-    "extract-catalog": "deno run -A scripts/extract_catalog.ts"
+    "extract-lookups": "deno run -A scripts/extract_lookups.ts && deno fmt src/lookups.data.ts",
+    "extract-catalog": "deno run -A scripts/extract_catalog.ts && deno fmt src/catalog.data.ts"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1",
